@@ -3,9 +3,9 @@
   Imports Slack conversation history from an export archive, to Microsoft Teams Channels
 
 .DESCRIPTION
-  Using a spreadsheet, this script will go through all Slack messages from an export archive into a corresponding
-  Microsoft Teams channel. First, the script will download all attachments then prompt the user to upload them
-  manually (to simplify the script), then will loop through all messages, including the attachments if any.
+  Using a .csv file, this script will go through all Slack messages from an Slack export into a corresponding
+  Microsoft Teams channel. The script runs through all the messages for each specified channel twice. The first
+  time downloading all the images, and the second to post the messages to Teams using the Graph API.
 
 .EXAMPLE
   PS C:\> Slack-Export-to-Teams.ps1 -ArchiveDir .\SLACK_EXPORT_DIR
@@ -31,11 +31,12 @@ param (
   [ValidateScript( { Test-Path -Path $_ })]
   [String]$SlackExportPath,
 
-  #[String]$ConfigurationPath = (Join-Path $PSScriptRoot 'config.json'),
-  [String]$ConfigurationPath = (Join-Path './' 'config.json'),
+  [String]$ConfigurationPath,
 
-  #[String]$DataPath = (Join-Path $PSScriptRoot 'data.csv')
-  [String]$DataPath = (Join-Path './' 'data.csv')
+  [String]$DataPath,
+
+  # In case of failure, try to resume from the last sent message
+  [switch]$Resume
 )
 
 
@@ -51,7 +52,8 @@ function Invoke-GraphRequest {
     [System.Collections.Hashtable]$QueryStringData,
     [String]$Body,
     [ValidateSet("Get", "Post", "Patch")]
-    [string]$Method = "Get"
+    [string]$Method = "Get",
+    [switch]$NextLink
   )
 
   function Update-Token {
@@ -65,9 +67,16 @@ function Invoke-GraphRequest {
     catch { throw }
   }
 
-  if ($Query -match '(?:v1\.0|beta)\/(.*)') {
+  if ($Query -match '(?:v1\.0|beta)\/(.*)' -and !$NextLink) {
     Write-Error "`"-Query`" parameter should not use full URL. Try again using just `"$($Matches[1])`""
     return
+  }
+
+  # ConverTo-Json doesn't esacpe these characters, causing pain and suffering.
+  if ($Body) {
+    foreach ($i in @(160, 183, 8220, 8221)) {
+      $Body = $Body -replace [char]$i, ('\u{0:x4}' -f $i)
+    }
   }
 
   # These queries will be assigned to the 'beta' endpiont instead of 'v1.0'
@@ -79,7 +88,10 @@ function Invoke-GraphRequest {
   if (($BetaRegex.Match($Query)).Success -contains $true) { $Endpoint = 'beta' }
   else { $Endpoint = 'v1.0' }
 
-  if ($QueryStringData) {
+  if ($NextLink) {
+    $URL = $Query
+  }
+  elseif ($QueryStringData) {
     $URL = "https://graph.microsoft.com/$Endpoint/$Query", (Get-EncodedQueryString $QueryStringData) -join '?'
   }
   else { $URL = "https://graph.microsoft.com/$Endpoint/$Query" }
@@ -194,7 +206,16 @@ function Get-SlackFilesInTeams {
       QueryStringData = @{ select = 'eTag,name,webUrl' }
     }
     $Response = Invoke-GraphRequest @Params
-    $Files += $Response.value | Select-Object name, webUrl, @{Label = 'guid'; Expression = { $_.eTag | Select-String -Pattern '{(.*?)}' | ForEach-Object { $_.matches.Groups[1].value } } }
+
+    # For some reason .docx files get junk appended to the url, so it needs to be stripped off otherwise Graph freaks out
+    # when trying to attach the file to a message.
+    $webUrl = @{
+      Label      = 'webUrl'
+      Expression = {
+        $_.webUrl -replace '&action=default&mobileredirect=true', ''
+      }
+    }
+    $Files += $Response.value | Select-Object name, $webUrl, @{Label = 'guid'; Expression = { $_.eTag | Select-String -Pattern '{(.*?)}' | ForEach-Object { $_.matches.Groups[1].value } } }
   }
   catch { throw }
 
@@ -233,7 +254,7 @@ function New-RootMessage {
         contentType = "html"
         content     = $Message
       }
-    } | ConvertTo-Json
+    } | ConvertTo-Json -Depth 10
     Method = 'Post'
   }
 
@@ -284,7 +305,7 @@ function New-ReplyMessage {
     [array]$Params.Body.attachments += $Attachments
   }
 
-  $Params.Body = $Params.Body | ConvertTo-Json
+  $Params.Body = $Params.Body | ConvertTo-Json -Depth 10
 
   $null = Invoke-GraphRequest @Params
 }
@@ -336,14 +357,6 @@ if (-not (Test-Path (Join-Path $SlackExportPath 'users.json'))) {
   throw "Failed to find the `"users.json`" file in `"$SlackExportPath`"."
 }
 
-if (-not (Test-Path $ConfigurationPath)) {
-  throw "Failed to find the configuration file at `"$ConfigurationPath`"."
-}
-
-if (-not (Test-Path $DataPath)) {
-  throw "Failed to find the data faile at `"$DataPath`"."
-}
-
 
 <# -----------------------------------------------------------------------------
                                  Set Variables
@@ -352,8 +365,27 @@ if (-not (Test-Path $DataPath)) {
 
 $Epoch = Get-Date 01.01.1970
 $WebClient = New-Object System.Net.WebClient
+$SaveCheckPoint = $false
+$AllowedSubtypes = 'file_comment', 'me_message', 'thread_broadcast'
 
-try { $SlackExportDir = Get-Item $SlackExportPath } catch { throw }
+if (!$PSScriptRoot) {
+  $ConfigurationPath = Join-Path (Get-Location) 'config.json'
+  $DataPath = Join-Path (Get-Location) 'data.csv'
+}
+else {
+  $ConfigurationPath = Join-Path $PSScriptRoot 'config.json'
+  $DataPath = Join-Path $PSScriptRoot 'data.csv'
+}
+
+if (-not (Test-Path $ConfigurationPath)) {
+  throw "Failed to find the configuration file at `"$ConfigurationPath`"."
+}
+
+if (-not (Test-Path $DataPath)) {
+  throw "Failed to find the data faile at `"$DataPath`"."
+}
+
+try { $SlackExportDir = Get-Item $SlackExportPath -ErrorAction Stop } catch { throw }
 
 try {
   # Generate constant variables $ClientID, $TenantID, and $RootMessageSubject from config.json
@@ -377,11 +409,21 @@ catch { throw "Failed to read `"channels.json`" in `"$($SlackExportDir.FullName)
 
 if (Test-Path (Join-Path $SlackExportDir.FullName 'groups.json')) {
   try { $Channels += Get-Content (Join-Path $SlackExportDir.FullName 'groups.json') -ErrorAction Stop | ConvertFrom-Json }
-  catch { throw "" }
+  catch { throw }
+}
+
+$CheckPointPath = Join-Path $SlackExportDir.FullName 'checkpoint.json'
+
+if ($Resume) {
+  if (Test-Path $CheckPointPath) {
+    try { $CheckPoint = Get-Content -Path $CheckPointPath -ErrorAction Stop | ConvertFrom-Json }
+    catch { throw }
+  }
+  else { throw "Parameter `"-Resume`" used, but could not find the checkpoint file at `"$CheckPointPath`"" }
 }
 
 if (-not (Get-Variable -Name 'Token' -ErrorAction SilentlyContinue)) {
-  # Setting "AllScope" will persist the $Token variable throughout all scopes to make it easier to use.
+  # Setting "AllScope" will persist the $Token variable throughout all scopes making it easier to use.
   New-Variable -Name 'Token' -Option AllScope
 }
 
@@ -406,19 +448,22 @@ $Channels | ForEach-Object {
 $AvailableTeams = Get-JoinedTeams
 
 # Begin going through each entry in the data.csv file
-$ItemCount = 1
-foreach ($item in $Data) {
+for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
+  if ($CheckPoint) { $i = $CheckPoint.item }
+  $item = $Data[$i]
 
-  Write-Progress ("Channel {0}/{1}" -f $ItemCount, ($Data | Measure-Object).Count)
+  Write-Progress ("Channel {0}/{1}" -f ($i + 1), ($Data | Measure-Object).Count)
+
+  if (!$item.slack_channel -or !$item.teams_channel -or !$item.teams_team) {
+    Write-Warning "Skipping Slack channel ({0}), missing either 'slack_channel', 'teams_team', or 'teams_channel' from `"$DataPath`"."
+    continue
+  }
 
   $Channel = $Channels | Where-Object { $_.name -eq $item.slack_channel }
   if (!$Channel) {
     Write-Warning ("Skipping Slack channel ({0}), make sure the name is correct" -f $item.slack_channel)
     continue
   }
-
-  try { $DayFiles = Get-ChildItem -Path $ChannelDir -File -Filter "*.json" -ErrorAction Stop | Sort-Object -Property Name }
-  catch { throw }
 
   $MstTeam = $item.teams_team
   $MstChannel = $item.teams_channel
@@ -427,6 +472,16 @@ foreach ($item in $Data) {
   $AttachmentDir = Join-Path $ChannelDir 'slack_files'
   $MessageBody = ''
   $LastMessage = $false
+  $ThreadTable = @{}
+  $RootMessageID = $false
+
+  try { $DayFiles = Get-ChildItem -Path $ChannelDir -File -Filter "*.json" -ErrorAction Stop | Sort-Object -Property Name }
+  catch { throw }
+
+  if (!$DayFiles) {
+    Write-Warning "Didn't find any files for the $($item.slack_channel) channel."
+    continue
+  }
 
   # Get the Team ID based on the name in data.csv
   $TeamID = ($AvailableTeams | Where-Object { $_.displayName -eq $MstTeam }).id
@@ -445,29 +500,37 @@ foreach ($item in $Data) {
     continue
   }
 
-  # Check the team messages to see if an import has been done already
+  # Check the channel's messages to find an existing import root message
   $ChannelMessages = Get-RootMessages -TeamID $TeamID -ChannelID $ChannelID
-  $RootMessage = $ChannelMessages.value | Where-Object { $_.subject -eq $RootMessageSubject }
-  if (!$RootMessage) {
-    Write-Progress "Creating root message to hold Slack history"
-    $Params = @{
-      TeamID    = $TeamID
-      ChannelID = $ChannelID
-      Subject   = $RootMessageSubject
-      Message   = @"
+  do {
+    $RootMessage = $ChannelMessages.value | Where-Object { $_.subject -eq $RootMessageSubject -and !$_.deletedDateTime }
+    if (!$RootMessage -and $ChannelMessages.'@odata.nextLink') {
+      $ChannelMessages = Invoke-GraphRequest -Query $ChannelMessages.'@odata.nextLink' -NextLink
+    }
+    elseif (!$RootMessage) {
+      if ($Resume) { Write-Warning 'The "-Resume" parameter was used, but no existing message was found.
+         Script will continue, but message history may be incomplete.'}
+      Write-Progress "Creating root message to hold Slack history"
+      $Params = @{
+        TeamID    = $TeamID
+        ChannelID = $ChannelID
+        Subject   = $RootMessageSubject
+        Message   = @"
 <p>This thread is for archival purposes, please do not post any messages here.</p>
+<p>Click "see more" to view all messages.</p>
 <pre>Channel: $($Channel.name)
 Creator: $ChannelCreator
 Topic: $($Channel.topic.value)
 Purpose: $($Channel.purpose.value)</pre>
 "@
+      }
+      $RootMessageID = New-RootMessage @Params
     }
-    $RootMessageID = New-RootMessage @Params
-  }
-  else {
-    Write-Host "Found existing root message"
-    $RootMessageID = $RootMessage.id
-  }
+    else {
+      Write-Host "Found existing root message"
+      $RootMessageID = $RootMessage.id
+    }
+  } until ($RootMessageID)
 
   if (-not (Test-Path $AttachmentDir)) {
     $null = New-Item -Path $AttachmentDir -ItemType Directory
@@ -478,8 +541,12 @@ Purpose: $($Channel.purpose.value)</pre>
 ----------------------------------------------------------------------------- #>
 
   # Loop through the messages and grab the files so they can be uploaded
+  Write-Progress "Looking for Files"
   $DayCount = 1
   foreach ($Day in $DayFiles) {
+
+    # Assume this was already done if '-Resume' is used.
+    if ($CheckPoint) { break }
 
     try { $Messages = Get-Content $Day.FullName -ErrorAction Stop | ConvertFrom-Json }
     catch { throw }
@@ -508,11 +575,15 @@ Purpose: $($Channel.purpose.value)</pre>
     $DayCount++
   }
 
-  if (Get-ChildItem $AttachmentDir) {
-    Write-Host "Files were downloaded. Please copy the `"slack_files`" folder into the $MSTChannel channel of the $MSTTeam team."
+  if ((Get-ChildItem $AttachmentDir) -and !$CheckPoint) {
+    Write-Host ""
+    Write-Host "Files were downloaded. Copy the `"slack_files`" folder into the $MSTChannel channel of the $MSTTeam team."
     $null = Read-Host 'Press "Enter" to open the location of "slack_files"'
+
     Start-Process -FilePath (join-path $ENV:windir 'explorer.exe') -ArgumentList "/root,`"$ChannelDir`""
-    $null = Read-Host 'Press "Enter" once you have copied the files, and they have finished uploading'
+    Write-Host ""
+    $null = Read-Host 'Press "Enter" once the files have completed uploading'
+
     Start-Sleep -Seconds 2
     $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
   }
@@ -523,28 +594,59 @@ Purpose: $($Channel.purpose.value)</pre>
 ----------------------------------------------------------------------------- #>
 
 
-  $DayCount = 1
-  foreach ($Day in $DayFiles) {
+  for ($d = 0; $d -lt $DayFiles.Count; $d++) {
+
+    if ($CheckPoint) { $d = $CheckPoint.day }
+    $Day = $DayFiles[$d]
 
     try { $Messages = Get-Content $Day.FullName -ErrorAction Stop | ConvertFrom-Json }
     catch { throw }
 
-    # Loop through all the messages in each chat file
-    $MessageCount = 1
-    foreach ($Message in $Messages) {
+    # Loop through all the messages for this day
+    for ($m = 0; $m -lt $Messages.Count; $m++) {
 
-      Write-Progress ("Day: {0}/{1} - Message: {2}/{3}" -f $DayCount, $DayFiles.Count, $MessageCount, $Messages.Count)
+      if ($CheckPoint) {
+        $m = $CheckPoint.message
+        $CheckPoint = $null
+      }
 
-      if ($DayCount -eq $DayFiles.Count -and $MessageCount -eq $Messages.Count - 1) { $LastMessage = $true }
+      if ($SaveCheckPoint) {
+        # Store the position after the last sent message,
+        # just in case the next one fails.
+        @{
+          item    = $i
+          day     = $d
+          message = $m
+        } | ConvertTo-Json | Set-content -Path $CheckPointPath
+        $SaveCheckPoint = $false
+      }
 
-      $AllowedSubtypes = 'file_comment', 'me_message', 'thread_broadcast'
-      # Skipping any messages other than standard user messages
-      if ($Message.subtype -and $AllowedSubtypes -notcontains $Message.subtype -and !$LastMessage) { continue }
+      $Message = $Messages[$m]
 
-      if ($Message.subtype -and $AllowedSubtypes -notcontains $Message.subtype -and $LastMessage -and $MessageBody) {
-        # We want to send now if it's the last message and doesn't meet the subtype we are looking for
+      Write-Progress ("Day: {0}/{1} - Message: {2}/{3}" -f ($d + 1), $DayFiles.Count, ($m + 1), $Messages.Count)
+
+      if (($d + 1) -eq $DayFiles.Count -and ($m + 1) -eq $Messages.Count) { $LastMessage = $true }
+
+      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and !$LastMessage) { 
+        # Skipping anything other than a message from a user, and not the last message
+        continue
+      }
+      elseif ($Message.bot_id) {
+        # Some bot messages don't have a subtype.
+        continue
+      }
+
+      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and $LastMessage -and $MessageBody) {
+        # Send message now if:
+        # - The message has a subtype
+        # - It's not a desired subtype
+        # - It's the last message for this channel
+        # - There is something to send
+
         Write-Progress "Reached last message: Sending"
         New-ReplyMessage -TeamID $TeamID -ChannelID $ChannelID -RootMessageID $RootMessageID -Message $MessageBody
+
+        $SaveCheckPoint = $true
         continue
       }
 
@@ -552,32 +654,39 @@ Purpose: $($Channel.purpose.value)</pre>
       $MessageText = $Message.text
       $Files = $Message.files
       $MessageAttachments = @()
-      $ThreadTable = @{}
 
       # The message username changes depending on the subtype (if any)
       if ($Message.subtype -eq 'file_comment') { $MessageUser = '' }
       else { $MessageUser = $UserFromID.($Message.user) }
 
       if ($Message.thread_ts -eq $Message.ts) {
+        # Builds a table of threaded posts, so replies can refer to them later
+        # Otherwise we would have to load all messages into memory first
+        # Any messages that are a part of a thread use the 'thread_ts' value
+        # to refer to the root message's 'ts' value.
         $ThreadTable.($Message.ts) = @{
           user = $MessageUser
           date = $MessageDate
         }
       }
 
-      # This pattern will grab any special Slack-formatted text
+      # This pattern grabs any special Slack-formatted text
+      # See https://api.slack.com/reference/surfaces/formatting#retrieving-messages
       $FormattedText = ($MessageText | Select-String -Pattern '<(.*?)>' -AllMatches).Matches
-      for ($i = 0; $i -lt $FormattedText.Count; $i++) {
 
-        switch -regex ($FormattedText[$i].Groups[1].Value) {
-          # Channel mentions
+      for ($ii = 0; $ii -lt $FormattedText.Count; $ii++) {
+
+        switch -regex ($FormattedText[$ii].Groups[1].Value) {
+
+          # Channel mention
           '^#(C.*)' {
             $Name = $ChannelFromID[$Matches[1]]
             if (!$Name) { $Matches[1] }
             $Replacement = '<a style="text-decoration: none;">@' + $Name + '</a>'
             break
           }
-          # User mentions
+          
+          # User mention
           '^@(U.*)' {
             $ID = $Matches[1] -split "\|"
             if ($ID.Count -gt 1) { $Name = $ID[1] }
@@ -588,54 +697,53 @@ Purpose: $($Channel.purpose.value)</pre>
             $Replacement = '<a style="text-decoration: none;">@' + $Name + '</a>'
             break
           }
-          # Special mentions
+
+          # Special mention
           '^!(.*)' {
             $Replacement = '<a style="text-decoration: none;">@' + $Matches[1] + '</a>'
             break
           }
+          
           # Links with alternative text
           '(.*)\|(.*)' {
             $Replacement = '<a href="' + $Matches[1] + '">' + $Matches[2] + '</a>'
             break
           }
+
           # Anything else, should be a link
           Default {
-            $Replacement = '<a href="' + $FormattedText[$i].Groups[1].Value + '">' + $FormattedText[$i].Groups[1].Value + '</a>'
+            $Replacement = '<a href="' + $FormattedText[$ii].Groups[1].Value + '">' + $FormattedText[$ii].Groups[1].Value + '</a>'
           }
         }
 
-        $MessageText = $MessageText.Replace($FormattedText[$i].Groups[0].Value, $Replacement)
-      }
-
-
-      # Unicode
-      $UnicodeText = ($MessageText | Select-String -Pattern '\\u[0-9a-fA-F]{4}' -AllMatches).Matches
-      for ($i = 0; $i -lt $UnicodeText.Count; $i++) {
-
-        $MessageText = $MessageText.Replace($UnicodeText[$i].Value, [regex]::Unescape($UnicodeText[$i].Value))
+        $MessageText = $MessageText.Replace($FormattedText[$ii].Groups[0].Value, $Replacement)
       }
 
       # Fix newlines
       $MessageText = $MessageText.Replace("`n", '<br />')
 
       if ($MessageBody.Length -gt 0) {
-        # Adds a space between messages in the same comment
+        # Add a space between messages
         $MessageBody += '<br>'
       }
 
-      if ($Message.subtype -eq 'me_message') { $MessageText = '/me ' + $MessageText }
+      # Start message
+      $MessageBody += '<div style="border: .2rem solid #777; border-top-color: rgb(0, 137, 0); border-radius: .3rem; padding: .8rem 1.6rem;">'
 
-      $MessageBody += '<div id="{0}" style="border: .2rem solid #777; border-top-color: rgb(0, 137, 0); border-radius: .3rem; padding: .8rem 1.6rem;">' -f $Message.ts
-
+      # Indicate a broadcast message
+      # See https://slackhq.com/getting-the-most-out-of-threads
       if ($Message.subtype -eq 'thread_broadcast') {
         $MessageBody += '<div><em>Also sent to the channel</em></div>'
       }
 
-      # TODO: Create table of threads so that we can refer to them in replies. Will need the 'ts', with the author and time of post.
-      if ($Message.thread_ts -and $Message.thread_ts -ne $Message.ts) {
+      # Indicate that the message is a reply to a thread
+      if ($Message.thread_ts -and ($Message.thread_ts -ne $Message.ts)) {
         $MessageBody += "<div><em>Reply to {0} @ {1}</em></div>" -f $ThreadTable.($Message.thread_ts).user, $ThreadTable.($Message.thread_ts).date
       }
 
+      if ($Message.subtype -eq 'me_message') { $MessageText = '/me ' + $MessageText }
+
+      # Message content (username, date, text)
       $MessageBody += @"
 <div style="padding-bottom: .8rem; border-bottom: .2rem solid #777;"><strong>$MessageUser</strong>&nbsp;&nbsp;<em>$MessageDate</em></div>
 <div style="padding-top: .8rem;">$MessageText
@@ -648,6 +756,7 @@ Purpose: $($Channel.purpose.value)</pre>
 
           # Slack stores each attachment in a folder with a unique ID. Easier to
           # append the ID to the filename instead of creating folders per attachment.
+          # Otherwise filenames would conflict.
           $FileName = $File.id + '-' + $File.name
           $TeamFile = $TeamsFiles | Where-Object { $_.name -eq $FileName }
           if ($File.mode -ne "external") {
@@ -657,7 +766,7 @@ Purpose: $($Channel.purpose.value)</pre>
 "@
 
             # Attachment information needs a separate section outside of the body of
-            # the message. the 'reference' contentType indicates the file already exists
+            # the message. The 'reference' contentType indicates the file already exists.
             $MessageAttachments += @{
               id          = $TeamFile.guid
               contentType = 'reference'
@@ -675,7 +784,8 @@ Purpose: $($Channel.purpose.value)</pre>
         #   going to send the message once it's about 25k characters just to be safe.
         # - We will also send if it's the last message of the channel.
         # - Lastly we'll send the message if there are any attachments, because
-        #   attachments always appear at the bottom of a message.
+        #   attachments always appear at the bottom of a message so it would be
+        #   confusing to show any more messages afterwards.
 
         Write-Progress "Sending Message"
 
@@ -690,15 +800,18 @@ Purpose: $($Channel.purpose.value)</pre>
         New-ReplyMessage @Params
 
         $MessageBody = ''
+        $SaveCheckPoint = $true
       }
 
-      $MessageCount++
     }
 
-    $DayCount++
   }
 
-  $ItemCount++
+  if (!$LastMessage) {
+    Write-Warning "Seems that there was an issue processing all the messages for the $($Channel.name) channel. `
+         Try again adding the `"-Resume`" parameter to try again from the last successful message."
+  }
+
 }
 
 Write-Host "Done!" -ForegroundColor Green
