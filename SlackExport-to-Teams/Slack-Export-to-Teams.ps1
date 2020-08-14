@@ -72,9 +72,9 @@ function Invoke-GraphRequest {
     return
   }
 
-  # ConverTo-Json doesn't esacpe these characters, causing pain and suffering.
+  # When the $Body gets converted to JSON, some characters don't get encoded properly causing pain and suffering.
   if ($Body) {
-    foreach ($i in @(160, 183, 8220, 8221)) {
+    foreach ($i in ($UnicodeChars | Sort-Object -Unique)) {
       $Body = $Body -replace [char]$i, ('\u{0:x4}' -f $i)
     }
   }
@@ -368,13 +368,22 @@ $WebClient = New-Object System.Net.WebClient
 $SaveCheckPoint = $false
 $AllowedSubtypes = 'file_comment', 'me_message', 'thread_broadcast'
 
-if (!$PSScriptRoot) {
-  $ConfigurationPath = Join-Path (Get-Location) 'config.json'
-  $DataPath = Join-Path (Get-Location) 'data.csv'
+if (!$ConfigurationPath) {
+  if (!$PSScriptRoot) {
+    $ConfigurationPath = Join-Path (Get-Location) 'config.json'
+  }
+  else {
+    $ConfigurationPath = Join-Path $PSScriptRoot 'config.json'
+  }
 }
-else {
-  $ConfigurationPath = Join-Path $PSScriptRoot 'config.json'
-  $DataPath = Join-Path $PSScriptRoot 'data.csv'
+
+if (!$DataPath) {
+  if (!$PSScriptRoot) {
+    $DataPath = Join-Path (Get-Location) 'data.csv'
+  }
+  else {
+    $DataPath = Join-Path $PSScriptRoot 'data.csv'
+  }
 }
 
 if (-not (Test-Path $ConfigurationPath)) {
@@ -474,6 +483,7 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   $LastMessage = $false
   $ThreadTable = @{}
   $RootMessageID = $false
+  $UnicodeChars = @()
 
   try { $DayFiles = Get-ChildItem -Path $ChannelDir -File -Filter "*.json" -ErrorAction Stop | Sort-Object -Property Name }
   catch { throw }
@@ -599,7 +609,15 @@ Purpose: $($Channel.purpose.value)</pre>
     if ($CheckPoint) { $d = $CheckPoint.day }
     $Day = $DayFiles[$d]
 
-    try { $Messages = Get-Content $Day.FullName -ErrorAction Stop | ConvertFrom-Json }
+    try { $RawMessages = Get-Content $Day.FullName -ErrorAction Stop }
+    catch { throw }
+
+    $UnicodeMatch = $RawMessages | Select-String -Pattern '\\u([0-9a-f]{4})' -AllMatches
+    $UnicodeChars += ($UnicodeMatch.Matches.Groups | Where-Object { $_.Name -eq '1' }).Value | ForEach-Object {
+      if ($_) { [int64]('0x' + $_) }
+    }
+    
+    try { $Messages = $RawMessages | ConvertFrom-Json -ErrorAction Stop }
     catch { throw }
 
     # Loop through all the messages for this day
@@ -643,7 +661,7 @@ Purpose: $($Channel.purpose.value)</pre>
         # - It's the last message for this channel
         # - There is something to send
 
-        Write-Progress "Reached last message: Sending"
+        Write-Progress ("Day: {0}/{1} - Message: {2}/{3} - Sending last message" -f ($d + 1), $DayFiles.Count, ($m + 1), $Messages.Count)
         New-ReplyMessage -TeamID $TeamID -ChannelID $ChannelID -RootMessageID $RootMessageID -Message $MessageBody
 
         $SaveCheckPoint = $true
@@ -787,7 +805,7 @@ Purpose: $($Channel.purpose.value)</pre>
         #   attachments always appear at the bottom of a message so it would be
         #   confusing to show any more messages afterwards.
 
-        Write-Progress "Sending Message"
+        Write-Progress ("Day: {0}/{1} - Message: {2}/{3} - Sending message" -f ($d + 1), $DayFiles.Count, ($m + 1), $Messages.Count)
 
         $Params = @{
           TeamID        = $TeamID
