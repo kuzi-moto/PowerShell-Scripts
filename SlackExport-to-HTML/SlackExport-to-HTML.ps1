@@ -8,26 +8,6 @@ param (
   [string]$Channel
 )
 
-# Look at https://powershellexplained.com/2017-03-18-Powershell-reading-and-saving-data-to-files/ for a better way to save to files.
-# Icons from https://icomoon.io/ from slack v2 font
-
-try {
-  $ExportDirectory = Get-Item $ExportPath -ErrorAction Stop
-}
-catch {
-  Write-Host "`"$ExportPath`" is not a valid directory."
-  return
-}
-
-try {
-  Get-Item (Join-Path $ExportDirectory.FullName 'channels.json') -ErrorAction Stop | Out-Null
-  Get-Item (Join-Path $ExportDirectory.FullName 'users.json') -ErrorAction Stop  | Out-Null
-}
-catch {
-  Write-Host "Either `"users.json`" or `"channels.json`" are missing. Please make sure you're using the correct directory"
-  return
-}
-
 ### Functions
 
 function Get-HTMLHead {
@@ -250,8 +230,30 @@ function Format-FileSize {
 
 ### End Functions
 
-$Users = Get-Content -Path '.\users.json' | ConvertFrom-Json
-$Channels = Get-Content -Path '.\channels.json' | ConvertFrom-Json
+# Look at https://powershellexplained.com/2017-03-18-Powershell-reading-and-saving-data-to-files/ for a better way to save to files.
+# Icons from https://icomoon.io/ from slack v2 font
+
+try {
+  $ExportDirectory = Get-Item $ExportPath -ErrorAction Stop
+}
+catch {
+  Write-Host "`"$ExportPath`" is not a valid directory."
+  return
+}
+
+try {
+  Get-Item (Join-Path $ExportDirectory.FullName 'channels.json') -ErrorAction Stop | Out-Null
+  Get-Item (Join-Path $ExportDirectory.FullName 'users.json') -ErrorAction Stop  | Out-Null
+}
+catch {
+  throw "Either `"users.json`" or `"channels.json`" are missing. Please make sure you're using the correct directory"
+}
+
+$Users = Get-Content -Path (Join-Path $ExportDirectory.FullName 'channels.json') | ConvertFrom-Json
+$Channels = Get-Content -Path (Join-Path $ExportDirectory.FullName 'users.json') | ConvertFrom-Json
+if (Test-Path (Join-Path $ExportDirectory.FullName 'groups.json')) {
+  $Channels += Get-Content -Path (Join-Path $ExportDirectory.FullName 'groups.json') | ConvertFrom-Json
+}
 $Epoch = Get-Date 01.01.1970
 $WebClient = New-Object System.Net.WebClient
 
@@ -290,7 +292,15 @@ for ($i = 0; $i -lt $Channels.Count; $i++) {
   $DestinationFolder = Join-Path $Destination $ChannelName
   $AttachmentFolder = Join-Path $DestinationFolder 'files'
   $HTMLFile = Join-Path $DestinationFolder 'index.html'
-  $ChatFiles = Get-ChildItem -Path (Join-Path $ExportDirectory.FullName $Channels[$i].name) | Sort-Object -Property Name
+
+  try {
+    $ChatFiles = Get-ChildItem -Path (Join-Path $ExportDirectory.FullName $Channels[$i].name) -ErrorAction Stop | Sort-Object -Property Name
+  }
+  catch {
+    Write-Warning "Couldn't find path for $ChannelName, skipping."
+    continue
+  }
+
   Write-Verbose "Channel: $ChannelName"
 
   if (-not (Test-Path $DestinationFolder)) {
