@@ -369,20 +369,20 @@ $SaveCheckPoint = $false
 $AllowedSubtypes = 'file_comment', 'me_message', 'thread_broadcast'
 
 if (!$ConfigurationPath) {
-  if (!$PSScriptRoot) {
-    $ConfigurationPath = Join-Path (Get-Location) 'config.json'
+  if ($PSScriptRoot) {
+    $ConfigurationPath = Join-Path $PSScriptRoot 'config.json'
   }
   else {
-    $ConfigurationPath = Join-Path $PSScriptRoot 'config.json'
+    $ConfigurationPath = Join-Path (Get-Location) 'config.json'
   }
 }
 
 if (!$DataPath) {
-  if (!$PSScriptRoot) {
-    $DataPath = Join-Path (Get-Location) 'data.csv'
+  if ($PSScriptRoot) {
+    $DataPath = Join-Path $PSScriptRoot 'data.csv'
   }
   else {
-    $DataPath = Join-Path $PSScriptRoot 'data.csv'
+    $DataPath = Join-Path (Get-Location) 'data.csv'
   }
 }
 
@@ -397,11 +397,14 @@ if (-not (Test-Path $DataPath)) {
 try { $SlackExportDir = Get-Item $SlackExportPath -ErrorAction Stop } catch { throw }
 
 try {
-  # Generate constant variables $ClientID, $TenantID, and $RootMessageSubject from config.json
+  # Generate ReadOnly variables $ClientID, $TenantID, $RootMessageSubject, and $SlackToken from config.json
   $ConfigFile = Get-Content $ConfigurationPath -ErrorAction Stop | ConvertFrom-Json
   foreach ($Property in $ConfigFile.PSObject.Properties) {
     if (-not (Get-Variable -Name $Property.Name -ErrorAction SilentlyContinue)) {
-      New-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Option Constant
+      New-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Option ReadOnly
+    }
+    else {
+      Set-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name)
     }
   }
 }
@@ -472,6 +475,14 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   if (!$Channel) {
     Write-Warning ("Skipping Slack channel ({0}), make sure the name is correct" -f $item.slack_channel)
     continue
+  }
+
+  if ($Channel.is_private -and !$SlackToken) {
+    Write-Warning ("Skipping Slack channel ({0}), channel is private and value `"SlackToken`" in config.json is empty." -f $item.slack_channel)
+    continue
+  }
+  elseif ($Channel.is_private) {
+    $WebClient.Headers.Set('Authorization', "Bearer $SlackToken")
   }
 
   $MstTeam = $item.teams_team
@@ -546,9 +557,11 @@ Purpose: $($Channel.purpose.value)</pre>
     $null = New-Item -Path $AttachmentDir -ItemType Directory
   }
 
+
   <# -----------------------------------------------------------------------------
                                  Process Files
 ----------------------------------------------------------------------------- #>
+
 
   # Loop through the messages and grab the files so they can be uploaded
   Write-Progress "Looking for Files"
@@ -616,7 +629,7 @@ Purpose: $($Channel.purpose.value)</pre>
     $UnicodeChars += ($UnicodeMatch.Matches.Groups | Where-Object { $_.Name -eq '1' }).Value | ForEach-Object {
       if ($_) { [int64]('0x' + $_) }
     }
-    
+
     try { $Messages = $RawMessages | ConvertFrom-Json -ErrorAction Stop }
     catch { throw }
 
@@ -645,7 +658,7 @@ Purpose: $($Channel.purpose.value)</pre>
 
       if (($d + 1) -eq $DayFiles.Count -and ($m + 1) -eq $Messages.Count) { $LastMessage = $true }
 
-      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and !$LastMessage) { 
+      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and !$LastMessage) {
         # Skipping anything other than a message from a user, and not the last message
         continue
       }
@@ -703,7 +716,7 @@ Purpose: $($Channel.purpose.value)</pre>
             $Replacement = '<a style="text-decoration: none;">@' + $Name + '</a>'
             break
           }
-          
+
           # User mention
           '^@(U.*)' {
             $ID = $Matches[1] -split "\|"
@@ -721,7 +734,7 @@ Purpose: $($Channel.purpose.value)</pre>
             $Replacement = '<a style="text-decoration: none;">@' + $Matches[1] + '</a>'
             break
           }
-          
+
           # Links with alternative text
           '(.*)\|(.*)' {
             $Replacement = '<a href="' + $Matches[1] + '">' + $Matches[2] + '</a>'
@@ -823,6 +836,10 @@ Purpose: $($Channel.purpose.value)</pre>
 
     }
 
+  }
+
+  if ($WebClient.Headers -contains 'Authorization') {
+    $WebClient.Headers.Remove('Authorization')
   }
 
   if (!$LastMessage) {
