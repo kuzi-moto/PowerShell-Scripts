@@ -28,6 +28,7 @@ The application will connect to the Graph API on your behalf. Here are instructi
     3. Search for the following permissions, and check the box next to them:
         * ChannelMessage.Read.All
         * ChannelMessage.Send
+        * Files.Read.All
         * Group.ReadWrite.All
         * Team.ReadBasic.All
     4. Click **Add permissions**
@@ -48,3 +49,7 @@ The script will now run through all of the entries in the `data.csv` file. The p
 * `-ConfigurationPath <path/to/config.json>` - [Optional] Path to the `config.json` file to use. By default this uses the directory the script is in
 * `-DataPath <path/to/data.csv>` - [Optional] Path to the `data.csv` file to use. By default this uses the directory the script is in
 * `-Resume` - [Optional] Add this switch to continue running the script from the last successfully sent message in the event of an error
+
+## Issues
+
+The most common issue so far is that Powershell 5 does not handle unicode characters very well. A lot of characters are encoded in the Slack export and are handled properly. Some characters are not, so I have included the decimal value for ones I have encountered. They are pretty easy to spot, using a missing character icon. To resolve, add the decimal value of the character to where the `$UnicodeChars` variable is assigned. A list of unicode characters and their decimal values can be found on [Wikipedia](https://en.wikipedia.org/wiki/List_of_Unicode_characters#Special_areas_and_format_characters).
