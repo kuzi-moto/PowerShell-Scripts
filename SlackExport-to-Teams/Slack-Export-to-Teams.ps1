@@ -134,7 +134,7 @@ function Invoke-GraphRequest {
           throw "Bad request - $($Response.message)"
         }
         Default {
-          throw "Other error: $($Response.code) - $($Response.message)"
+          throw "Other error: $($Response.code) - $($Response.message) - $URL"
         }
       }
     }
@@ -201,20 +201,20 @@ function Get-SlackFilesInTeams {
 
   $Files = @()
   try {
+    
     $Params = @{
       Query           = "drives/$($DriveInfo.parentReference.driveId)/items/$($SlackFolder.id)/children"
       QueryStringData = @{ select = 'eTag,name,webUrl' }
     }
     $Response = Invoke-GraphRequest @Params
 
-    # For some reason .docx files get junk appended to the url, so it needs to be stripped off otherwise Graph freaks out
+    # For some reason office documents get junk appended to the url, so it needs to be stripped off otherwise Graph freaks out
     # when trying to attach the file to a message.
     $webUrl = @{
       Label      = 'webUrl'
-      Expression = {
-        $_.webUrl -replace '&action=default&mobileredirect=true', ''
-      }
+      Expression = { $_.webUrl -replace '&action=.*', '' }
     }
+
     $Files += $Response.value | Select-Object name, $webUrl, @{Label = 'guid'; Expression = { $_.eTag | Select-String -Pattern '{(.*?)}' | ForEach-Object { $_.matches.Groups[1].value } } }
   }
   catch { throw }
@@ -404,7 +404,7 @@ try {
       New-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Option ReadOnly
     }
     else {
-      Set-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name)
+      Set-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Force
     }
   }
 }
@@ -494,7 +494,9 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   $LastMessage = $false
   $ThreadTable = @{}
   $RootMessageID = $false
-  $UnicodeChars = @()
+  # For some reason some unicode characters are not encoded in the Slack export. Pre-populating this variable with
+  # some I ran into otherwise they are not re-encoded properly when sending a message.
+  $UnicodeChars = @(160, 8211, 8217, 8220, 8221, 8226, 8230)
 
   try { $DayFiles = Get-ChildItem -Path $ChannelDir -File -Filter "*.json" -ErrorAction Stop | Sort-Object -Property Name }
   catch { throw }
@@ -584,11 +586,14 @@ Purpose: $($Channel.purpose.value)</pre>
         if (Test-Path $AttachmentFile) {
           Write-Verbose "File $($File.title) already downloaded"
         }
+        elseif ($File.mode -eq 'tombstone') {
+          Write-Verbose "Deleted file - skipping"
+        }
         elseif ($File.mode -ne "external") {
           Write-Progress "Downloading $($File.title)"
 
           try { $WebClient.DownloadFile($File.url_private_download, $AttachmentFile) }
-          catch { Write-Warning "Error downloading" }
+          catch { Write-Warning "Error downloading: Day: $($Day.basename) File: $($File.name)"; $File }
         }
       }
 
@@ -608,8 +613,9 @@ Purpose: $($Channel.purpose.value)</pre>
     $null = Read-Host 'Press "Enter" once the files have completed uploading'
 
     Start-Sleep -Seconds 2
-    $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
   }
+
+  $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
 
 
   <# -----------------------------------------------------------------------------
@@ -622,7 +628,7 @@ Purpose: $($Channel.purpose.value)</pre>
     if ($CheckPoint) { $d = $CheckPoint.day }
     $Day = $DayFiles[$d]
 
-    try { $RawMessages = Get-Content $Day.FullName -ErrorAction Stop }
+    try { $RawMessages = Get-Content $Day.FullName -Encoding UTF8 -ErrorAction Stop }
     catch { throw }
 
     $UnicodeMatch = $RawMessages | Select-String -Pattern '\\u([0-9a-f]{4})' -AllMatches
@@ -681,7 +687,7 @@ Purpose: $($Channel.purpose.value)</pre>
         continue
       }
 
-      $MessageDate = ($Epoch.AddSeconds($Message.ts)).ToString('M/d/yyyy h:m tt')
+      $MessageDate = ($Epoch.AddSeconds($Message.ts)).ToString('M/d/yyyy h:mm tt')
       $MessageText = $Message.text
       $Files = $Message.files
       $MessageAttachments = @()
@@ -790,7 +796,10 @@ Purpose: $($Channel.purpose.value)</pre>
           # Otherwise filenames would conflict.
           $FileName = $File.id + '-' + $File.name
           $TeamFile = $TeamsFiles | Where-Object { $_.name -eq $FileName }
-          if ($File.mode -ne "external") {
+          if ($File.mode -eq 'tombstone') {
+            $MessageBody += '<div>&lt;Attached file was deleted.&gt;</div>'
+          }
+          elseif ($File.mode -ne "external") {
             $MessageBody += @"
 <div>&lt;Attached: $FileName&gt;</div>
 <attachment id="$($TeamFile.guid)"></attachment>
