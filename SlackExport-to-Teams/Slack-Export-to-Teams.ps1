@@ -60,9 +60,14 @@ function Invoke-GraphRequest {
     # Utilizes global $Token variable
     try {
       Write-Progress "Updating access token"
-      Write-Host ""
-      Write-Host "Please login. If you don't see the login pop-up, it may be hidden behind the terminal window." -ForegroundColor Yellow
-      $Token = Get-MsalToken -ClientId $ClientId -TenantId $TenantID -Interactive -RedirectUri "http://localhost"
+      try {
+        $Token = Get-MsalToken -ClientId $ClientId -TenantId $TenantID -Silent -RedirectUri "http://localhost" -ErrorAction Stop
+      }
+      catch {
+        Write-Host ""
+        Write-Host "Please login. If you don't see the login pop-up, it may be hidden behind the terminal window." -ForegroundColor Yellow    
+        $Token = Get-MsalToken -ClientId $ClientId -TenantId $TenantID -Interactive -RedirectUri "http://localhost"
+      } 
     }
     catch { throw }
   }
@@ -301,7 +306,6 @@ function New-ReplyMessage {
   }
 
   if ($Attachments) {
-    #$Params.Body.attachments = @()
     [array]$Params.Body.attachments += $Attachments
   }
 
@@ -338,6 +342,22 @@ function Format-FileSize {
   ElseIf ($Size -gt 1KB) { [string]::Format("{0:0.00} kB", $Size / 1KB) }
   ElseIf ($Size -gt 0) { [string]::Format("{0:0.00} B", $Size) }
   Else { "" }
+}
+
+
+function Format-FileName {
+  Param(
+    [string]$Name,
+    [string]$Mode
+  )
+
+  $Replace = $Name -replace '[<>:"\/\\\|\?\*]', '-'
+  if ($Mode -eq 'snippet' -and $Replace -notmatch '\.[a-z0-9]+$') {
+    $FullName = $Replace + '.txt'
+  }
+  else { $FullName = $Replace }
+
+  return $FullName
 }
 
 
@@ -531,8 +551,10 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
       $ChannelMessages = Invoke-GraphRequest -Query $ChannelMessages.'@odata.nextLink' -NextLink
     }
     elseif (!$RootMessage) {
-      if ($Resume) { Write-Warning 'The "-Resume" parameter was used, but no existing message was found.
-         Script will continue, but message history may be incomplete.'}
+      if ($Resume) {
+        Write-Warning 'The "-Resume" parameter was used, but no existing message was found.
+         Script will continue, but message history may be incomplete.'
+      }
       Write-Progress "Creating root message to hold Slack history"
       $Params = @{
         TeamID    = $TeamID
@@ -581,19 +603,42 @@ Purpose: $($Channel.purpose.value)</pre>
 
       foreach ($File in $Message.files) {
 
-        $AttachmentFile = Join-Path $AttachmentDir ($File.id + '-' + $File.name)
-
-        if (Test-Path $AttachmentFile) {
-          Write-Verbose "File $($File.title) already downloaded"
-        }
-        elseif ($File.mode -eq 'tombstone') {
+        if ($File.mode -eq 'tombstone') {
           Write-Verbose "Deleted file - skipping"
+          continue
         }
-        elseif ($File.mode -ne "external") {
-          Write-Progress "Downloading $($File.title)"
+        if ($File.mode -eq 'external') {
+          Write-Verbose "External file - skipping"
+          continue
+        }
+        if ($File.mode -eq 'space') {
+          Write-Warning "Found a slack `"Post`" $($File.title)) - can't download this file. Link: $($File.permalink)"
+          continue
+        }
 
-          try { $WebClient.DownloadFile($File.url_private_download, $AttachmentFile) }
-          catch { Write-Warning "Error downloading: Day: $($Day.basename) File: $($File.name)"; $File }
+        $FileName = Format-FileName -Name ($File.id + '-' + $File.name) -Mode $File.mode
+        $FilePath = Join-Path $AttachmentDir $FileName
+
+        if ($File.mode -eq 'hosted') {
+          Write-Progress "Downloading file: $($File.title)"
+        }
+        elseif ($File.mode -eq 'snippet') {
+          Write-Progress "Downloading snippet: $($File.title)"
+        }
+        else {
+          throw "Unable to download file ($($File.title)) - Unknown type: $($File.mode)"
+        }
+
+        if (Test-Path $FilePath) {
+          Write-Verbose "File $($File.title) already downloaded"
+          continue
+        }
+        
+        try { $WebClient.DownloadFile($File.url_private_download, $FilePath) }
+        catch {
+          Write-Warning "Error downloading: Day: $($Day.basename) File: $($File.name)"
+          $File
+          return
         }
       }
 
@@ -614,8 +659,9 @@ Purpose: $($Channel.purpose.value)</pre>
 
     Start-Sleep -Seconds 2
   }
-
-  $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
+  if (Get-ChildItem $AttachmentDir) {
+    $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
+  }
 
 
   <# -----------------------------------------------------------------------------
@@ -794,10 +840,14 @@ Purpose: $($Channel.purpose.value)</pre>
           # Slack stores each attachment in a folder with a unique ID. Easier to
           # append the ID to the filename instead of creating folders per attachment.
           # Otherwise filenames would conflict.
-          $FileName = $File.id + '-' + $File.name
+          $FileName = Format-FileName ($File.id + '-' + $File.name) -Mode $File.mode
+          
           $TeamFile = $TeamsFiles | Where-Object { $_.name -eq $FileName }
           if ($File.mode -eq 'tombstone') {
             $MessageBody += '<div>&lt;Attached file was deleted.&gt;</div>'
+          }
+          elseif ($File.mode -eq 'space') {
+            $MessageBody += "<div>&lt;Slack post: <a href=`"$($File.permalink)`">$($File.title)</a>&gt;</div>"
           }
           elseif ($File.mode -ne "external") {
             $MessageBody += @"
