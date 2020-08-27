@@ -53,26 +53,30 @@ function Invoke-GraphRequest {
     [String]$Body,
     [ValidateSet("Get", "Post", "Patch")]
     [string]$Method = "Get",
-    [switch]$NextLink
+    [switch]$FullUrl
   )
 
   function Update-Token {
     # Utilizes global $Token variable
-    try {
-      Write-Progress "Updating access token"
-      try {
-        $Token = Get-MsalToken -ClientId $ClientId -TenantId $TenantID -Silent -RedirectUri "http://localhost" -ErrorAction Stop
-      }
-      catch {
-        Write-Host ""
-        Write-Host "Please login. If you don't see the login pop-up, it may be hidden behind the terminal window." -ForegroundColor Yellow    
-        $Token = Get-MsalToken -ClientId $ClientId -TenantId $TenantID -Interactive -RedirectUri "http://localhost"
-      } 
+
+    $Params = @{
+      ClientID    = $ClientId
+      TenantID    = $TenantID
+      RedirectUri = 'http://localhost'
     }
-    catch { throw }
+
+    Write-Progress "Updating access token"
+
+    try { $Token = Get-MsalToken @Params -Silent }
+    catch {
+      Write-Host ""
+      Write-Host "Please login. If you don't see the login pop-up, it may be hidden behind the terminal window." -ForegroundColor Yellow
+      try { $Token = Get-MsalToken @Params -Interactive }
+      catch { throw }
+    }
   }
 
-  if ($Query -match '(?:v1\.0|beta)\/(.*)' -and !$NextLink) {
+  if ($Query -match '(?:v1\.0|beta)\/(.*)' -and !$FullUrl) {
     Write-Error "`"-Query`" parameter should not use full URL. Try again using just `"$($Matches[1])`""
     return
   }
@@ -93,7 +97,7 @@ function Invoke-GraphRequest {
   if (($BetaRegex.Match($Query)).Success -contains $true) { $Endpoint = 'beta' }
   else { $Endpoint = 'v1.0' }
 
-  if ($NextLink) {
+  if ($FullUrl) {
     $URL = $Query
   }
   elseif ($QueryStringData) {
@@ -546,9 +550,10 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   # Check the channel's messages to find an existing import root message
   $ChannelMessages = Get-RootMessages -TeamID $TeamID -ChannelID $ChannelID
   do {
+    
     $RootMessage = $ChannelMessages.value | Where-Object { $_.subject -eq $RootMessageSubject -and !$_.deletedDateTime }
     if (!$RootMessage -and $ChannelMessages.'@odata.nextLink') {
-      $ChannelMessages = Invoke-GraphRequest -Query $ChannelMessages.'@odata.nextLink' -NextLink
+      $ChannelMessages = Invoke-GraphRequest -Query $ChannelMessages.'@odata.nextLink' -FullUrl
     }
     elseif (!$RootMessage) {
       if ($Resume) {
@@ -711,11 +716,22 @@ Purpose: $($Channel.purpose.value)</pre>
       if (($d + 1) -eq $DayFiles.Count -and ($m + 1) -eq $Messages.Count) { $LastMessage = $true }
 
       if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and !$LastMessage) {
-        # Skipping anything other than a message from a user, and not the last message
+        # Skipping a message if:
+        # - It has a subtype
+        # - The subtype isn't one we want
+        # - It's not the last message (otherwise we might not send some messages)
+        continue
+      }
+      elseif ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and $LastMessage -and !$MessageBody) {
+        # Skipping a message if:
+        # - It has a subtype
+        # - The subtype isn't one we want
+        # - It is the last message
+        # - There are no pending messages
         continue
       }
       elseif ($Message.bot_id) {
-        # Some bot messages don't have a subtype.
+        # Some bot messages don't have a subtype, but a bot_id
         continue
       }
 
@@ -762,20 +778,24 @@ Purpose: $($Channel.purpose.value)</pre>
         switch -regex ($FormattedText[$ii].Groups[1].Value) {
 
           # Channel mention
-          '^#(C.*)' {
-            $Name = $ChannelFromID[$Matches[1]]
-            if (!$Name) { $Matches[1] }
+          '#(C.+)' {
+            $ID = $Matches[1] -split "\|"
+            if ($ID.Count -gt 1) { $Name = $ID[1] }
+            else {
+              $Name = $ChannelFromID[$Matches[1]]
+              if (!$Name) { $Name = $Matches[1] }
+            }
             $Replacement = '<a style="text-decoration: none;">@' + $Name + '</a>'
             break
           }
 
           # User mention
-          '^@(U.*)' {
+          '^@(U.+)' {
             $ID = $Matches[1] -split "\|"
             if ($ID.Count -gt 1) { $Name = $ID[1] }
             else {
               $Name = $UserFromID[$ID]
-              if (!$Name) { Write-Host 'didnt find name'; $Name = $Matches[1] -replace '<', '' -replace '>', '' }
+              if (!$Name) { $Name = $Matches[1] }
             }
             $Replacement = '<a style="text-decoration: none;">@' + $Name + '</a>'
             break
@@ -788,7 +808,7 @@ Purpose: $($Channel.purpose.value)</pre>
           }
 
           # Links with alternative text
-          '(.*)\|(.*)' {
+          '(.*?)\|(.*)' {
             $Replacement = '<a href="' + $Matches[1] + '">' + $Matches[2] + '</a>'
             break
           }
