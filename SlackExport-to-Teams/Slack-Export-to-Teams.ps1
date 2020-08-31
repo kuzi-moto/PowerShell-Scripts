@@ -35,6 +35,9 @@ param (
 
   [String]$DataPath,
 
+  # Sets the maximum message length since the Slack max is higher than Teams
+  [int]$MessageTrimLength = 25000,
+
   # In case of failure, try to resume from the last sent message
   [switch]$Resume
 )
@@ -67,7 +70,7 @@ function Invoke-GraphRequest {
 
     Write-Progress "Updating access token"
 
-    try { $Token = Get-MsalToken @Params -Silent }
+    try { $Token = Get-MsalToken @Params -Silent -ErrorAction Stop }
     catch {
       Write-Host ""
       Write-Host "Please login. If you don't see the login pop-up, it may be hidden behind the terminal window." -ForegroundColor Yellow
@@ -75,6 +78,8 @@ function Invoke-GraphRequest {
       catch { throw }
     }
   }
+
+  if (!$Token) { Update-Token }
 
   if ($Query -match '(?:v1\.0|beta)\/(.*)' -and !$FullUrl) {
     Write-Error "`"-Query`" parameter should not use full URL. Try again using just `"$($Matches[1])`""
@@ -104,9 +109,10 @@ function Invoke-GraphRequest {
     $URL = "https://graph.microsoft.com/$Endpoint/$Query", (Get-EncodedQueryString $QueryStringData) -join '?'
   }
   else { $URL = "https://graph.microsoft.com/$Endpoint/$Query" }
+  
+  $AccessToken = $Token.AccessToken
 
-  for ($i = 0; $i -lt 3; $i++) {
-    $AccessToken = $Token.AccessToken
+  for ($i = 0; $i -lt 5; $i++) {
     try {
       if ($Method -eq "Get") {
         return Invoke-RestMethod -Method $Method -Headers @{Authorization = "Bearer $AccessToken" } -Uri $URL
@@ -140,15 +146,23 @@ function Invoke-GraphRequest {
           throw "Forbidden - you do not have access to the requested item"
         }
         'BadRequest' {
-          throw "Bad request - $($Response.message)"
+          Write-Warning "Bad request - $($Response.message) - $URL"
+          Write-Host "--------------------`n"
+          Write-Host "Body: $Body"
+          Write-Host "`n--------------------"
+          throw
         }
         Default {
-          throw "Other error: $($Response.code) - $($Response.message) - $URL"
+          Write-Warning "Other error: $($Response.code) - $($Response.message) - $URL"
         }
       }
     }
+
+    Write-Host "`nWating 3 seconds and trying again..."
+    Start-Sleep -Seconds 3
   }
-  throw 'Invoke-GraphRequest failed to run the query after 3 attempts.'
+
+  throw 'Invoke-GraphRequest failed to run the query after 5 attempts.'
 }
 
 
@@ -359,6 +373,9 @@ function Format-FileName {
   if ($Mode -eq 'snippet' -and $Replace -notmatch '\.[a-z0-9]+$') {
     $FullName = $Replace + '.txt'
   }
+  if ($Mode -eq 'email' -and $Replace -notmatch '\.[a-z0-9]+$') {
+    $FullName = $Replace + '.html'
+  }
   else { $FullName = $Replace }
 
   return $FullName
@@ -425,7 +442,7 @@ try {
   $ConfigFile = Get-Content $ConfigurationPath -ErrorAction Stop | ConvertFrom-Json
   foreach ($Property in $ConfigFile.PSObject.Properties) {
     if (-not (Get-Variable -Name $Property.Name -ErrorAction SilentlyContinue)) {
-      New-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Option ReadOnly
+      New-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Scope global -Option ReadOnly
     }
     else {
       Set-Variable -Name $Property.Name -Value $ConfigFile.($Property.Name) -Force
@@ -630,6 +647,9 @@ Purpose: $($Channel.purpose.value)</pre>
         elseif ($File.mode -eq 'snippet') {
           Write-Progress "Downloading snippet: $($File.title)"
         }
+        elseif ($File.mode -eq 'email') {
+          Write-Progress "Downloading email: $($File.title)"
+        }
         else {
           throw "Unable to download file ($($File.title)) - Unknown type: $($File.mode)"
         }
@@ -752,7 +772,17 @@ Purpose: $($Channel.purpose.value)</pre>
       $MessageDate = ($Epoch.AddSeconds($Message.ts)).ToString('M/d/yyyy h:mm tt')
       $MessageText = $Message.text
       $Files = $Message.files
+      $NewMessage = ''
+      $MessageTooLarge = $false
       $MessageAttachments = @()
+
+      if ($MessageText.Length -gt 25000) {
+        # If a single message is longer than 25,000 characters script will fail to send.
+        # Logic to split the message into multiple message could be added but we're just
+        # going to truncate it.
+        Write-Warning "A message was too large and has been truncated. Message TS: $($Message.ts)"
+        $MessageText = $MessageText.Substring(0, $MessageTrimLength) + '<br>&lt;Message was too large and has been truncated.&gt;'
+      }
 
       # The message username changes depending on the subtype (if any)
       if ($Message.subtype -eq 'file_comment') { $MessageUser = '' }
@@ -826,57 +856,59 @@ Purpose: $($Channel.purpose.value)</pre>
       $MessageText = $MessageText.Replace("`n", '<br />')
 
       if ($MessageBody.Length -gt 0) {
-        # Add a space between messages
-        $MessageBody += '<br>'
+        # Adds a space between messages
+        $NewMessage += '<br>'
       }
 
       # Start message
-      $MessageBody += '<div style="border: .2rem solid #777; border-top-color: rgb(0, 137, 0); border-radius: .3rem; padding: .8rem 1.6rem;">'
+      $NewMessage += '<div style="border: .2rem solid #777; border-top-color: rgb(0, 137, 0); border-radius: .3rem; padding: .8rem 1.6rem;">'
 
-      # Indicate a broadcast message
-      # See https://slackhq.com/getting-the-most-out-of-threads
       if ($Message.subtype -eq 'thread_broadcast') {
-        $MessageBody += '<div><em>Also sent to the channel</em></div>'
+        # Indicate a broadcast message, see https://slackhq.com/getting-the-most-out-of-threads
+        $NewMessage += '<div><em>Also sent to the channel</em></div>'
       }
 
-      # Indicate that the message is a reply to a thread
       if ($Message.thread_ts -and ($Message.thread_ts -ne $Message.ts)) {
-        $MessageBody += "<div><em>Reply to {0} @ {1}</em></div>" -f $ThreadTable.($Message.thread_ts).user, $ThreadTable.($Message.thread_ts).date
+        # Indicate that the message is a reply to a thread
+        $NewMessage += "<div><em>Reply to {0} @ {1}</em></div>" -f $ThreadTable.($Message.thread_ts).user, $ThreadTable.($Message.thread_ts).date
       }
 
-      if ($Message.subtype -eq 'me_message') { $MessageText = '/me ' + $MessageText }
+      if ($Message.subtype -eq 'me_message') { $MessageText = '<em>/me ' + $MessageText + '</em>' }
 
-      # Message content (username, date, text)
-      $MessageBody += @"
+      # Main message content (username, date, text)
+      $NewMessage += @"
 <div style="padding-bottom: .8rem; border-bottom: .2rem solid #777;"><strong>$MessageUser</strong>&nbsp;&nbsp;<em>$MessageDate</em></div>
 <div style="padding-top: .8rem;">$MessageText
 "@
 
-      # Add attachments
       if ($Files) {
+        # Add attachments
 
         foreach ($File in $Files) {
-
           # Slack stores each attachment in a folder with a unique ID. Easier to
           # append the ID to the filename instead of creating folders per attachment.
           # Otherwise filenames would conflict.
+
           $FileName = Format-FileName ($File.id + '-' + $File.name) -Mode $File.mode
           
           $TeamFile = $TeamsFiles | Where-Object { $_.name -eq $FileName }
+
+          if (!$TeamFile) { Write-Warning "Couldn't find file ($FileName) in Teams. Unable to attach to message." }
+
           if ($File.mode -eq 'tombstone') {
-            $MessageBody += '<div>&lt;Attached file was deleted.&gt;</div>'
+            $NewMessage += '<div>&lt;Attached file was deleted.&gt;</div>'
           }
           elseif ($File.mode -eq 'space') {
-            $MessageBody += "<div>&lt;Slack post: <a href=`"$($File.permalink)`">$($File.title)</a>&gt;</div>"
+            $NewMessage += "<div>&lt;Slack post: <a href=`"$($File.permalink)`">$($File.title)</a>&gt;</div>"
           }
           elseif ($File.mode -ne "external") {
-            $MessageBody += @"
+            $NewMessage += @"
 <div>&lt;Attached: $FileName&gt;</div>
 <attachment id="$($TeamFile.guid)"></attachment>
 "@
 
             # Attachment information needs a separate section outside of the body of
-            # the message. The 'reference' contentType indicates the file already exists.
+            # the message. The 'reference' contentType indicates the file already exists in Teams.
             $MessageAttachments += @{
               id          = $TeamFile.guid
               contentType = 'reference'
@@ -887,15 +919,32 @@ Purpose: $($Channel.purpose.value)</pre>
         }
       }
 
-      $MessageBody += '</div></div>'
+      $NewMessage += '</div></div>'
 
-      if ($MessageBody.Length -gt 25000 -or $LastMessage -or $MessageAttachments) {
+      if (!$MessageBody -and $NewMessage.Length -ge 26000) {
+        # Error out if the only message is too large, otherwise script will get stuck.
+        throw "Message too large. Please re-run and set `"-MessageTrimLength`" to a value lower than 25000."
+      }
+      elseif (($NewMessage + $MessageBody).Length -lt 26000) {
+        # Slack maximum message size is 40,000 characters, so only add the curent
+        # message if it doesn't put us over the character limit.
+        $MessageBody += $NewMessage
+      }
+      else {
+        $d = $LastMessagePos.d
+        $m = $LastMessagePos.m
+        $MessageAttachments = @()
+        $MessageTooLarge = $true
+      }
+
+      if ($MessageBody.Length -gt 25000 -or $LastMessage -or $MessageAttachments -or $MessageTooLarge) {
         # - In testing, the max $MessageBody allowed was about 28k characters. We're
-        #   going to send the message once it's about 25k characters just to be safe.
+        #   going to send the message once it's about 26k characters just to be safe.
         # - We will also send if it's the last message of the channel.
-        # - Lastly we'll send the message if there are any attachments, because
+        # - We'll send the message if there are any attachments, because
         #   attachments always appear at the bottom of a message so it would be
         #   confusing to show any more messages afterwards.
+        # - Lastly send the message if the current one is too large
 
         Write-Progress ("Day: {0}/{1} - Message: {2}/{3} - Sending message" -f ($d + 1), $DayFiles.Count, ($m + 1), $Messages.Count)
 
@@ -911,21 +960,24 @@ Purpose: $($Channel.purpose.value)</pre>
 
         $MessageBody = ''
         $SaveCheckPoint = $true
-      }
 
-    }
+      } # End send message logic
 
-  }
+      $LastMessagePos = @{ d = $d; m = $m }
+
+    } # End message loop
+
+  } # End day loop
 
   if ($WebClient.Headers -contains 'Authorization') {
     $WebClient.Headers.Remove('Authorization')
   }
 
   if (!$LastMessage) {
-    Write-Warning "Seems that there was an issue processing all the messages for the $($Channel.name) channel. `
+    Write-Warning "Seems that there might have been an issue processing all the messages for the `"$($Channel.name)`" channel. `
          Try again adding the `"-Resume`" parameter to try again from the last successful message."
   }
 
-}
+} # End channel loop
 
 Write-Host "Done!" -ForegroundColor Green
