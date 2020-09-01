@@ -227,7 +227,10 @@ function Get-SlackFilesInTeams {
     
     $Params = @{
       Query           = "drives/$($DriveInfo.parentReference.driveId)/items/$($SlackFolder.id)/children"
-      QueryStringData = @{ select = 'eTag,name,webUrl' }
+      QueryStringData = @{
+        select = 'eTag,name,webUrl'
+        top    = 999
+      }
     }
     $Response = Invoke-GraphRequest @Params
 
@@ -594,7 +597,7 @@ Purpose: $($Channel.purpose.value)</pre>
       $RootMessageID = New-RootMessage @Params
     }
     else {
-      Write-Host "Found existing root message"
+      Write-Host "Found existing root message for `"$($Channel.name)`""
       $RootMessageID = $RootMessage.id
     }
   } until ($RootMessageID)
@@ -611,7 +614,6 @@ Purpose: $($Channel.purpose.value)</pre>
 
   # Loop through the messages and grab the files so they can be uploaded
   Write-Progress "Looking for Files"
-  $DayCount = 1
   foreach ($Day in $DayFiles) {
 
     # Assume this was already done if '-Resume' is used.
@@ -620,7 +622,6 @@ Purpose: $($Channel.purpose.value)</pre>
     try { $Messages = Get-Content $Day.FullName -ErrorAction Stop | ConvertFrom-Json }
     catch { throw }
 
-    $MessageCount = 1
     foreach ($Message in $Messages) {
 
       foreach ($File in $Message.files) {
@@ -633,8 +634,8 @@ Purpose: $($Channel.purpose.value)</pre>
           Write-Verbose "External file - skipping"
           continue
         }
-        if ($File.mode -eq 'space') {
-          Write-Warning "Found a slack `"Post`" $($File.title)) - can't download this file. Link: $($File.permalink)"
+        if ($File.mode -match 'space|docs') {
+          Write-Warning "Found a slack `"Post`" ($($File.title)) - can't download this file. Link: $($File.permalink)"
           continue
         }
 
@@ -651,7 +652,7 @@ Purpose: $($Channel.purpose.value)</pre>
           Write-Progress "Downloading email: $($File.title)"
         }
         else {
-          throw "Unable to download file ($($File.title)) - Unknown type: $($File.mode)"
+          throw "Unable to download file ($($File.title)) from `"$($Channel.name)`" - Unknown type: $($File.mode)"
         }
 
         if (Test-Path $FilePath) {
@@ -667,10 +668,8 @@ Purpose: $($Channel.purpose.value)</pre>
         }
       }
 
-      $MessageCount++
     }
 
-    $DayCount++
   }
 
   if ((Get-ChildItem $AttachmentDir) -and !$CheckPoint) {
@@ -685,6 +684,7 @@ Purpose: $($Channel.purpose.value)</pre>
     Start-Sleep -Seconds 2
   }
   if (Get-ChildItem $AttachmentDir) {
+    Write-Progress "Getting File information from Teams"
     $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
   }
 
@@ -893,8 +893,6 @@ Purpose: $($Channel.purpose.value)</pre>
           
           $TeamFile = $TeamsFiles | Where-Object { $_.name -eq $FileName }
 
-          if (!$TeamFile) { Write-Warning "Couldn't find file ($FileName) in Teams. Unable to attach to message." }
-
           if ($File.mode -eq 'tombstone') {
             $NewMessage += '<div>&lt;Attached file was deleted.&gt;</div>'
           }
@@ -902,6 +900,8 @@ Purpose: $($Channel.purpose.value)</pre>
             $NewMessage += "<div>&lt;Slack post: <a href=`"$($File.permalink)`">$($File.title)</a>&gt;</div>"
           }
           elseif ($File.mode -ne "external") {
+            if (!$TeamFile) { Write-Warning "Couldn't find file ($FileName) in Teams. Unable to attach to message." }
+
             $NewMessage += @"
 <div>&lt;Attached: $FileName&gt;</div>
 <attachment id="$($TeamFile.guid)"></attachment>
