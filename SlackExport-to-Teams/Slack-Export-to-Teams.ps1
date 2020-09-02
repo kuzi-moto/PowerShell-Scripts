@@ -265,7 +265,7 @@ function Get-TeamsChannelFolderItems {
   $Files = @()
 
   do {
-    
+
     try { $Response = Invoke-GraphRequest @Params }
     catch { throw }
 
@@ -565,7 +565,7 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   $RootMessageID = $false
   # For some reason some unicode characters are not encoded in the Slack export. Pre-populating this variable with
   # some I ran into otherwise they are not re-encoded properly when sending a message.
-  $UnicodeChars = @(160, 8211, 8217, 8220, 8221, 8226, 8230)
+  $UnicodeChars = @(160, 162, 174, 194, 226, 8211, 8217, 8220, 8221, 8222, 8226, 8230, 8482)
 
   try { $DayFiles = Get-ChildItem -Path $ChannelDir -File -Filter "*.json" -ErrorAction Stop | Sort-Object -Property Name }
   catch { throw }
@@ -576,6 +576,7 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   }
 
   # Get the Team ID based on the name in data.csv
+  Write-Progress "Getting Team ID for $MstTeam"
   $TeamID = ($AvailableTeams | Where-Object { $_.displayName -eq $MstTeam }).id
   if (!$TeamID) {
     Write-Warning ("Skipping Slack channel ({0}), associated team ({1}) not found." -f $item.slack_channel, $MSTTeam)
@@ -583,9 +584,11 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   }
 
   # Get all the channels from the requested Team so we can find the channel ID
+  Write-Progress "Getting channels for $MstTeam"
   $AvailableChannels = Get-TeamChannels $TeamID
 
   # Get the Channel ID based on the name in data.csv
+  Write-Progress "Getting Channel ID for $MstChannel"
   $ChannelID = ($AvailableChannels | Where-Object { $_.displayName -eq $MstChannel }).id
   if (!$ChannelID) {
     Write-Warning ("Skipping Slack channel ({0}), associated Teams channel ({1}) not found." -f $item.slack_channel, $MSTChannel)
@@ -593,6 +596,7 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   }
 
   # Check the channel's messages to find an existing import root message
+  Write-Progress "Searching for existing root message"
   $ChannelMessages = Get-RootMessages -TeamID $TeamID -ChannelID $ChannelID
   do {
 
@@ -716,8 +720,8 @@ Purpose: $($Channel.purpose.value)</pre>
 
     $Count = 0
     do {
-      if ($Count -gt 5) { Write-Progress "Still waiting on the `"slack_files`" folder. Has it been copied to the correct location?" }
-      else { Write-Progress "Looking for `"slack_files`" folder" }
+      if ($Count -gt 2) { Write-Progress "Waiting for the `"slack_files`" folder. Has it been copied to the correct location?" }
+      else { Write-Progress "Looking for the `"slack_files`" folder" }
 
       $SlackFolder = Get-TeamsChannelFolders -DriveID $DriveInfo.parentReference.driveId -ItemID $DriveInfo.id | ForEach-Object { $_.value } | Where-Object { $_.name -eq 'slack_files' }
 
@@ -727,7 +731,7 @@ Purpose: $($Channel.purpose.value)</pre>
 
     $Count = 0
     do {
-      if ($Count -gt 5) { Write-Progress "Still waiting for files to upload. Found $($TeamsFiles.count) of $($LocalFiles.count) files" }
+      if ($Count -gt 0) { Write-Progress "Waiting for files to upload. Found $($TeamsFiles.count) of $($LocalFiles.count) files" }
       else { Write-Progress "Getting file information from Teams" }
 
       $TeamsFiles = Get-TeamsChannelFolderItems -DriveID $DriveInfo.parentReference.driveId -ItemID $SlackFolder.id
