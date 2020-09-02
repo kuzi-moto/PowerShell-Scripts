@@ -109,7 +109,7 @@ function Invoke-GraphRequest {
     $URL = "https://graph.microsoft.com/$Endpoint/$Query", (Get-EncodedQueryString $QueryStringData) -join '?'
   }
   else { $URL = "https://graph.microsoft.com/$Endpoint/$Query" }
-  
+
   $AccessToken = $Token.AccessToken
 
   for ($i = 0; $i -lt 5; $i++) {
@@ -188,7 +188,8 @@ function Get-TeamChannels {
 }
 
 
-function Get-SlackFilesInTeams {
+function Get-TeamsChannelFilesLocation {
+  # Get the metadata for the location where the files of a channel are stored.
   param (
     [Parameter(Mandatory = $true)]
     [String]$TeamID,
@@ -197,55 +198,87 @@ function Get-SlackFilesInTeams {
   )
 
   try {
-    # Get the metadata for the location where the files of a channel are stored.
     $Params = @{
       Query           = "teams/$TeamID/channels/$ChannelID/filesFolder"
       QueryStringData = @{ select = 'parentReference,id' }
     }
-    $DriveInfo = Invoke-GraphRequest @Params
+
+    Invoke-GraphRequest @Params
   }
   catch { throw }
 
+}
+
+
+function Get-TeamsChannelFolders {
+  # Get the folders for the channel
+  param (
+    [Parameter(Mandatory = $true)]
+    [String]$DriveID,
+    [Parameter(Mandatory = $true)]
+    [String]$ItemID
+  )
+
   try {
-    # Get the folders for the channel
     $Params = @{
-      Query           = "drives/$($DriveInfo.parentReference.driveId)/items/$($DriveInfo.id)/children"
+      Query           = "drives/$DriveID/items/$ItemID/children"
       QueryStringData = @{ select = 'id,name' }
     }
-    $DriveFolders = Invoke-GraphRequest @Params
+
+    Invoke-GraphRequest @Params
   }
   catch { throw }
 
-  $SlackFolder = $DriveFolders.value | Where-Object { $_.name -eq 'slack_files' }
+}
 
-  if (!$SlackFolder) {
-    throw "Could not find the `"slack_files`" directory for this channel please check that you have copied it to the right location."
-  }
 
-  $Files = @()
-  try {
-    
-    $Params = @{
-      Query           = "drives/$($DriveInfo.parentReference.driveId)/items/$($SlackFolder.id)/children"
-      QueryStringData = @{
-        select = 'eTag,name,webUrl'
-        top    = 999
-      }
+function Get-TeamsChannelFolderItems {
+  param (
+    [Parameter(Mandatory = $true)]
+    [String]$DriveID,
+    [Parameter(Mandatory = $true)]
+    [String]$ItemID
+  )
+
+  $Params = @{
+    Query           = "drives/$DriveID/items/$ItemID/children"
+    QueryStringData = @{
+      select = 'eTag,name,webUrl'
+      top    = 999
     }
-    $Response = Invoke-GraphRequest @Params
-
-    # For some reason office documents get junk appended to the url, so it needs to be stripped off otherwise Graph freaks out
-    # when trying to attach the file to a message.
-    $webUrl = @{
+  }
+  $Select = @(
+    'name'
+    @{
+      # For some reason office documents get junk appended to the url, so it needs to be stripped off otherwise
+      # Graph freaks out when trying to attach the file to a message.
       Label      = 'webUrl'
       Expression = { $_.webUrl -replace '&action=.*', '' }
     }
+    @{
+      Label      = 'guid'
+      Expression = {
+        $_.eTag | Select-String -Pattern '{(.*?)}' | ForEach-Object { $_.matches.Groups[1].value }
+      }
+    }
+  )
+  $Files = @()
 
-    $Files += $Response.value | Select-Object name, $webUrl, @{Label = 'guid'; Expression = { $_.eTag | Select-String -Pattern '{(.*?)}' | ForEach-Object { $_.matches.Groups[1].value } } }
-  }
-  catch { throw }
+  do {
+    
+    try { $Response = Invoke-GraphRequest @Params }
+    catch { throw }
 
-  $Files
+    $Files += $Response.value | Select-Object $Select
+
+    if ($Response.'@odata.nextLink') {
+      $Params.Query = $Response.'@odata.nextLink'
+      $Params.FullUrl = $true
+    }
+
+  } until (!$Response.'@odata.nextLink')
+
+  return $Files
 }
 
 
@@ -354,34 +387,26 @@ function Get-EncodedQueryString {
 }
 
 
-function Format-FileSize {
-  # Stolen from https://superuser.com/a/468795
-  Param ([int]$Size)
-  If ($Size -gt 1TB) { [string]::Format("{0:0.00} TB", $Size / 1TB) }
-  ElseIf ($Size -gt 1GB) { [string]::Format("{0:0.00} GB", $Size / 1GB) }
-  ElseIf ($Size -gt 1MB) { [string]::Format("{0:0.00} MB", $Size / 1MB) }
-  ElseIf ($Size -gt 1KB) { [string]::Format("{0:0.00} kB", $Size / 1KB) }
-  ElseIf ($Size -gt 0) { [string]::Format("{0:0.00} B", $Size) }
-  Else { "" }
-}
-
-
 function Format-FileName {
   Param(
     [string]$Name,
     [string]$Mode
   )
 
-  $Replace = $Name -replace '[<>:"\/\\\|\?\*]', '-'
-  if ($Mode -eq 'snippet' -and $Replace -notmatch '\.[a-z0-9]+$') {
-    $FullName = $Replace + '.txt'
-  }
-  if ($Mode -eq 'email' -and $Replace -notmatch '\.[a-z0-9]+$') {
-    $FullName = $Replace + '.html'
-  }
-  else { $FullName = $Replace }
+  $NewName = $Name -replace '[<>:"\/\\\|\?\*]', '-'
 
-  return $FullName
+  if ($NewName -notmatch '\.[a-z0-9]+$') {
+    # Add an extension if it's missing
+
+    switch ($Mode) {
+      'snippet' { return $NewName + '.txt' }
+      'email' { return $NewName + '.html' }
+      Default { return $NewName }
+    }
+  }
+  else {
+    return $NewName
+  }
 }
 
 
@@ -570,7 +595,7 @@ for ($i = 0; $i -lt ($Data | Measure-Object).Count; $i++) {
   # Check the channel's messages to find an existing import root message
   $ChannelMessages = Get-RootMessages -TeamID $TeamID -ChannelID $ChannelID
   do {
-    
+
     $RootMessage = $ChannelMessages.value | Where-Object { $_.subject -eq $RootMessageSubject -and !$_.deletedDateTime }
     if (!$RootMessage -and $ChannelMessages.'@odata.nextLink') {
       $ChannelMessages = Invoke-GraphRequest -Query $ChannelMessages.'@odata.nextLink' -FullUrl
@@ -605,6 +630,8 @@ Purpose: $($Channel.purpose.value)</pre>
   if (-not (Test-Path $AttachmentDir)) {
     $null = New-Item -Path $AttachmentDir -ItemType Directory
   }
+
+  $Resume = $false
 
 
   <# -----------------------------------------------------------------------------
@@ -659,7 +686,7 @@ Purpose: $($Channel.purpose.value)</pre>
           Write-Verbose "File $($File.title) already downloaded"
           continue
         }
-        
+
         try { $WebClient.DownloadFile($File.url_private_download, $FilePath) }
         catch {
           Write-Warning "Error downloading: Day: $($Day.basename) File: $($File.name)"
@@ -672,20 +699,44 @@ Purpose: $($Channel.purpose.value)</pre>
 
   }
 
-  if ((Get-ChildItem $AttachmentDir) -and !$CheckPoint) {
+  $LocalFiles = Get-ChildItem $AttachmentDir
+
+  if ($LocalFiles -and !$CheckPoint) {
     Write-Host ""
-    Write-Host "Files were downloaded. Copy the `"slack_files`" folder into the $MSTChannel channel of the $MSTTeam team."
+    Write-Host "Files were downloaded. Copy the `"slack_files`" folder into the `"$MSTChannel`" channel of the `"$MSTTeam`" team."
     $null = Read-Host 'Press "Enter" to open the location of "slack_files"'
 
     Start-Process -FilePath (join-path $ENV:windir 'explorer.exe') -ArgumentList "/root,`"$ChannelDir`""
-    Write-Host ""
-    $null = Read-Host 'Press "Enter" once the files have completed uploading'
 
     Start-Sleep -Seconds 2
   }
-  if (Get-ChildItem $AttachmentDir) {
-    Write-Progress "Getting File information from Teams"
-    $TeamsFiles = Get-SlackFilesInTeams -TeamID $TeamID -ChannelID $ChannelID
+
+  if ($LocalFiles) {
+    $DriveInfo = Get-TeamsChannelFilesLocation -TeamID $TeamID -ChannelID $ChannelID
+
+    $Count = 0
+    do {
+      if ($Count -gt 5) { Write-Progress "Still waiting on the `"slack_files`" folder. Has it been copied to the correct location?" }
+      else { Write-Progress "Looking for `"slack_files`" folder" }
+
+      $SlackFolder = Get-TeamsChannelFolders -DriveID $DriveInfo.parentReference.driveId -ItemID $DriveInfo.id | ForEach-Object { $_.value } | Where-Object { $_.name -eq 'slack_files' }
+
+      if (!$SlackFolder) { Start-Sleep -Seconds 10 }
+      $Count++
+    } until ($SlackFolder)
+
+    $Count = 0
+    do {
+      if ($Count -gt 5) { Write-Progress "Still waiting for files to upload. Found $($TeamsFiles.count) of $($LocalFiles.count) files" }
+      else { Write-Progress "Getting file information from Teams" }
+
+      $TeamsFiles = Get-TeamsChannelFolderItems -DriveID $DriveInfo.parentReference.driveId -ItemID $SlackFolder.id
+
+      $Done = $TeamsFiles.count -eq $LocalFiles.count
+
+      if (!$Done) { Start-Sleep -Seconds 10 }
+      $Count++
+    } until ($Done)
   }
 
 
@@ -735,7 +786,20 @@ Purpose: $($Channel.purpose.value)</pre>
 
       if (($d + 1) -eq $DayFiles.Count -and ($m + 1) -eq $Messages.Count) { $LastMessage = $true }
 
-      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and !$LastMessage) {
+      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and $LastMessage -and $MessageBody) {
+        # Send message now if:
+        # - The message has a subtype
+        # - It's not a desired subtype
+        # - It's the last message for this channel
+        # - There is something to send
+
+        Write-Progress ("Day: {0}/{1} - Message: {2}/{3} - Sending last message" -f ($d + 1), $DayFiles.Count, ($m + 1), $Messages.Count)
+        New-ReplyMessage -TeamID $TeamID -ChannelID $ChannelID -RootMessageID $RootMessageID -Message $MessageBody
+
+        $SaveCheckPoint = $true
+        continue
+      }
+      elseif ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and !$LastMessage) {
         # Skipping a message if:
         # - It has a subtype
         # - The subtype isn't one we want
@@ -752,20 +816,6 @@ Purpose: $($Channel.purpose.value)</pre>
       }
       elseif ($Message.bot_id) {
         # Some bot messages don't have a subtype, but a bot_id
-        continue
-      }
-
-      if ($Message.subtype -and ($AllowedSubtypes -notcontains $Message.subtype) -and $LastMessage -and $MessageBody) {
-        # Send message now if:
-        # - The message has a subtype
-        # - It's not a desired subtype
-        # - It's the last message for this channel
-        # - There is something to send
-
-        Write-Progress ("Day: {0}/{1} - Message: {2}/{3} - Sending last message" -f ($d + 1), $DayFiles.Count, ($m + 1), $Messages.Count)
-        New-ReplyMessage -TeamID $TeamID -ChannelID $ChannelID -RootMessageID $RootMessageID -Message $MessageBody
-
-        $SaveCheckPoint = $true
         continue
       }
 
@@ -890,13 +940,13 @@ Purpose: $($Channel.purpose.value)</pre>
           # Otherwise filenames would conflict.
 
           $FileName = Format-FileName ($File.id + '-' + $File.name) -Mode $File.mode
-          
+
           $TeamFile = $TeamsFiles | Where-Object { $_.name -eq $FileName }
 
           if ($File.mode -eq 'tombstone') {
             $NewMessage += '<div>&lt;Attached file was deleted.&gt;</div>'
           }
-          elseif ($File.mode -eq 'space') {
+          elseif ($File.mode -match 'space|docs') {
             $NewMessage += "<div>&lt;Slack post: <a href=`"$($File.permalink)`">$($File.title)</a>&gt;</div>"
           }
           elseif ($File.mode -ne "external") {
