@@ -61,7 +61,7 @@ catch {
 
 try { $null = Get-OTSAuthorizationToken }
 catch {
-  try { Set-OTSAuthorizationToken -Username $UserName -APIKey $APIKey -BaseUrl 'https://onetimesecret.com/' -ErrorAction Stop }
+  try { $null = Set-OTSAuthorizationToken -Username $UserName -APIKey $APIKey <# -BaseUrl 'https://onetimesecret.com/' #> -ErrorAction Stop }
   catch {
     Write-Warning "Failed to get authorization token, exiting..."
     return
@@ -80,19 +80,24 @@ if ($Secret.Count -eq 1) {
 
 if (!$SecretList) { $SecretList = $Secret }
 
-for ($i = 0; $i -lt $SecretList.Count; $i++) {
-  Write-Progress -Activity "Querying onetimesecret.com" -Status ("Fetching secret {0}/{1}" -f ($i + 1), $SecretList.Count) -PercentComplete ($i / $SecretList.Count * 100)
-  $ProcessedList += @{
-    Link   = $SecretList[$i] | Get-OTS
-    Secret = $SecretList[$i]
-  }
+if ($SecretList.Count -eq 1) {
+  $SecretList | Get-OTS
 }
+else {
+  for ($i = 0; $i -lt $SecretList.Count; $i++) {
+    Write-Progress -Activity "Querying onetimesecret.com" -Status ("Fetching secret {0}/{1}" -f ($i + 1), $SecretList.Count) -PercentComplete ($i / $SecretList.Count * 100)
+    $ProcessedList += @{
+      Link   = $SecretList[$i] | Get-OTS
+      Secret = $SecretList[$i]
+    }
+  }
 
-$ProcessedList | `
-  ForEach-Object { [PSCustomObject]$_ } | `
-  Export-Csv -Path $SecretFile -NoTypeInformation
+  $ProcessedList | `
+    ForEach-Object { [PSCustomObject]$_ } | `
+    Export-Csv -Path $SecretFile -NoTypeInformation
 
-Write-Host "Secret links saved to `"$SecretFile`""
+  Write-Host "Secret links saved to `"$SecretFile`""
+}
 
 if ($SaveConfig) {
   @{ APIKey = $APIKey; UserName = $UserName } | `

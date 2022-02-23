@@ -1,3 +1,5 @@
+/Active Directory/config.json
+/Active Directory/org_chart.*
 /OneTimeSecret.com/config.json
 /OneTimeSecret.com/secrets.csv
 /SlackExport-Channels-Export-Csv/*.csv

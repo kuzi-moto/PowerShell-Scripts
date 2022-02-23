@@ -1,0 +1,3 @@
+Connect-ExchangeOnline
+
+Get-Recipient 
