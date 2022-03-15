@@ -1,3 +1,25 @@
+<#
+.SYNOPSIS
+    Add a list of users to an Active Directory group.
+.DESCRIPTION
+    Use this script to add a list of users in a plain text file, or from a csv
+    file to an Active Directory group. The list should contain the UPN of each
+    user to add to the group. The script will ask which group you want to add
+    users to. If multiple are found it will ask which one out of that group.
+.PARAMETER Path
+    Specifies the path the the user list. Accepts .txt and .csv files.
+.EXAMPLE
+    PS C:\> .\Bulk_Add_Users_to_Groups.ps1 -Path ".\users.txt"
+    Runs the script with the 'users.txt' file.
+.INPUTS
+    None. You cannot pipe to Bulk_Add_Users_to_Groups.ps1
+.OUTPUTS
+    None.
+.Notes
+    Run this Script with a user account with admin access to the domain you're
+    trying to modify.
+#>
+
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, HelpMessage = "Path to the list of users")]
@@ -5,6 +27,8 @@ param (
 )
 
 $UPNColumn = $null
+
+### Some basic tests ###
 
 try {
     $File = Get-Item $Path -ErrorAction SilentlyContinue
@@ -59,9 +83,11 @@ else {
     return
 }
 
+### Find the group ###
+
 do {
     
-    $GroupName = Read-Host "Enter the name of a group to add users"
+    $GroupName = Read-Host "Enter the name of a group"
 
     if ($GroupName -eq '') {
         Write-Host  'Need to enter something' -ForegroundColor Yellow
@@ -115,13 +141,15 @@ do {
             }
         } until ($Done)
 
-
-    
     }
-    elseif ($GroupName -eq '') {}
+    elseif ($GroupName -eq '') { <# Do nothing. Need to return to the beginning of the loop #> }
     else { Write-Host "Not sure what happened but couldn't find a group. Try again" -ForegroundColor Red }
 
 } until ($Group)
+
+### Add users to the group ###
+
+$ErrorUsers = @()
 
 $GroupMembers = $Group | Get-ADGroupMember | Get-ADUser
 
@@ -133,8 +161,25 @@ for ($i = 0; $i -lt $UserList.Count; $i++) {
         Write-Host "$($UserList[$i]) - Already a member"
     }
     else {
-        $Group | Add-ADGroupMember -Members $UserList[$i]
-        Write-Host "$($UserList[$i]) - Added to group" -ForegroundColor Green
+        try {
+            $Group | Add-ADGroupMember -Members $UserList[$i] -ErrorAction SilentlyContinue
+            Write-Host "$($UserList[$i]) - Added to group" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "ERROR: Adding $($UserList[$i]) to $($Group.Name): $($Error[0].Exception.Message)" -ForegroundColor Red
+            $ErrorUsers += $UserList[$i]
+        }
     }
 
 }
+
+Write-Progress -Activity "Adding users to $($Group.Name)" -Completed
+
+Write-Host "Done!" -ForegroundColor Green
+
+if ($ErrorUsers.Count -gt 0) {
+    Write-Host 'The following users encountered an error while adding to the group:'
+    $ErrorUsers | Out-Host
+}
+
+Start-Sleep -Seconds 5
