@@ -1,10 +1,6 @@
 # PowerShell
 
-Just a repository of random PowerShell scripts and bits I create.
-
-## Notes
-
-This folder contains little snippets of code that don't form a complete script, but show how somethings can be done.
+Just a repository of random PowerShell scripts and bits I create. Some scripts rely on external files, and so pulling the whole repository will ensure everything works.
 
 ## Scripts
 

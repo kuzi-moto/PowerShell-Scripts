@@ -6,16 +6,15 @@ param (
 
 #--------------[ Includes ]--------------
 
-$Lib = Join-Path $PSScriptRoot 'lib'
+$Lib = Join-Path (Get-Item -Path $PSScriptRoot).Parent 'lib'
 
-. "$Lib/Load-ConfigFile.ps1"
-. "$Lib/Test-ServerConnection.ps1"
-. "$Lib/Invoke-ServerCommand.ps1"
+. "$Lib\Get-ConfigFile.ps1"
+. "$Lib\Remote_Functions.ps1"
 
 
 #-----------[ Main Execution ]-----------
 
-Load-ConfigFile $PSScriptRoot
+Get-ConfigFile $PSScriptRoot
 
 if (-not (Test-ServerConnection)) { return }
 
