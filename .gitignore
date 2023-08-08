@@ -1,7 +1,5 @@
 /Active Directory/org_chart.*
-
 /SlackExport-to-HTML/output/
-
 /.vscode/
 *.json
 *.csv
