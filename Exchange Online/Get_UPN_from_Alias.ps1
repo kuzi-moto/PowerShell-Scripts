@@ -289,7 +289,7 @@ $Table | Out-Host
 do {
     $AliasColumn = Read-Host "Enter name of column which contains user alias"
     if ($Columns -notcontains $AliasColumn) {
-        Write-Host "Error: $AliasColumn doesn't exist, try again" -ForegroundColor Red
+        Write-Warning "`"$AliasColumn`" doesn't exist, try again"
         $AliasColumn = ""
     }
 } until ($AliasColumn)

@@ -8,28 +8,35 @@ Function Connect-ToEXO {
     process {
         # Check if EXO is installed and connect if no connection exists
         if ($null -eq (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-            Write-Host "Exchange Online PowerShell v2 module is requied, do you want to install it?" -ForegroundColor Yellow
+            Write-Host "Exchange Online PowerShell v3 module is requied, do you want to install it?" -ForegroundColor Yellow
 
-            $install = Read-Host Do you want to install module? [Y] Yes [N] No
+            $install = Read-Host 'Do you want to install module? [Y] Yes [N] No'
             if ($install -match "[yY]") {
-                Write-Host "Installing Exchange Online PowerShell v2 module" -ForegroundColor Cyan
+                Write-Host "Installing Exchange Online PowerShell v3 module" -ForegroundColor Cyan
                 Install-Module ExchangeOnlineManagement -Repository PSGallery -AllowClobber -Force
             }
             else {
-                Write-Error "Please install EXO v2 module."
+                Write-Error "Please install EXO v3 module."
             }
         }
 
+        # Check if there is an active EXO session
+        if (Get-Module -ListAvailable -Name ExchangeOnlineManagement | Where-Object { $_.version -like "3.*" } ) {
 
-        if ($null -ne (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-            # Check if there is a active EXO sessions
-            $psSessions = Get-PSSession | Select-Object -Property State, Name
-            If (((@($psSessions) -like '@{State=Opened; Name=ExchangeOnlineInternalSession*').Count -gt 0) -ne $true) {
-                Connect-ExchangeOnline
+            if ((Get-ConnectionInformation).tokenStatus -ne 'Active') {
+                write-host 'Connecting to Exchange Online' -ForegroundColor Cyan
+                Connect-ExchangeOnline -UserPrincipalName $adminUPN
             }
+
         }
         else {
-            Write-Error "Please install EXO v2 module."
+
+            $psSessions = Get-PSSession | Select-Object -Property State, Name
+            If (((@($psSessions) -like '@{State=Opened; Name=ExchangeOnlineInternalSession*').Count -gt 0) -ne $true) {
+                write-host 'Connecting to Exchange Online' -ForegroundColor Cyan
+                Connect-ExchangeOnline -UserPrincipalName $adminUPN
+            }
+            
         }
     }
 }
@@ -41,7 +48,7 @@ function Search-Alias {
     )
 
     try {
-        $User = Get-Recipient $Alias -ErrorAction SilentlyContinue
+        [array]$User = Get-Recipient $Alias -ErrorAction SilentlyContinue
     }
     catch {
         throw
@@ -51,12 +58,34 @@ function Search-Alias {
         Write-Warning "Multiple users found for $Alias"
         return $null
     }
-    elseif ($User) {
-        return $User
+    elseif ($User.Count -eq 1) {
+        return $User[0]
     }
     else {
         Write-Warning "$Alias not found"
         Return $null
     }
+
+}
+
+function Search-Group {
+    param (
+        [string]$Query
+    )
+
+    try {
+        switch -Regex ($Query) {
+            '[\da-fA-F]{8}-([\da-fA-F]{4}-){3}[\da-fA-F]{12}' {
+                Get-Group -Identity $Query
+                break
+            }
+            Default {
+                Get-Group -Anr $Query
+            }
+        }
+    }
+    catch { throw }
+
+
 
 }
