@@ -1,10 +1,14 @@
 # Atlassian Cloud
 
-Scripts for interacting with Atlassian Cloud
+Scripts for interacting with Atlassian Cloud. This is different from [AtlassianPS](https://atlassianps.org/docs/JiraPS/) beause it is not limited to Jira and Confluence. You can interact with the Atlassian Admin interface at the endpoint `/gateway/api/`, and the Jira email processor plugin `/rest/jira-email-processor-plugin/1.0/mail/audit/process` which are generally undocumented and not easy to work with for someone unfamiliar with using API's.
+
+It also works with the SCIM/user provisioning endpoint `scim/directory` which is documented but lacks decent PowerShell tools to work with.
+
+I have not attempted to implement all of the available API methods, only what was needed for my use due to time contstraints.
 
 ## Configuration
 
-For convenience the scripts do not accept commonly used values such as email address, api keys, or other id's as parameters. Instead, the scripts will ask for the values as needed and then automatically save them in this folder as `config.json`. This way, scripts can be run with minimal fuss and not having to keep track of what keys to use for what purpose.
+For convenience the scripts do not accept commonly used values such as email address, api keys, or other id's as parameters. Instead, the scripts will ask for the values as needed and then automatically save them in this folder as `config.json`. This way, scripts can be run with minimal fuss and not having to keep track of what keys to use for what purpose. It will also determine if the key is no longer valid, and request a new one.
 
 ## API Keys/Tokens
 
@@ -38,9 +42,13 @@ Reference for useful commands or things that don't require a script. Before runn
 . .\Atlassian_Functions.ps1
 ```
 
+## General Usage
+
+There are several scripts I've created to simplify some tasks. Otherwise, you can just use the functions provided in `Atlassian_Functions.ps1`. Documentataion on some functions is a little sparse I try to add more as I have time, but are generally self-explanitory.
+
 ### Using Invoke-AtlassianApiRequest
 
-The `Invoke-AtlassianApiRequest` helper function will allow you to directly interact with the Atlassian API.
+The `Invoke-AtlassianApiRequest` helper function will allow you to directly interact with the Atlassian API. This will allow you to run any request from the Atlassian API even if a function hasn't been provided for it.
 
 ### Find the smart value for a field
 

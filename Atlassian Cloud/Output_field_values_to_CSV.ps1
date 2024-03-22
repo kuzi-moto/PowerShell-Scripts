@@ -18,7 +18,7 @@ param (
     [Parameter(Mandatory=$true, HelpMessage="Enter an issue key")]
     [string]$IssueKey,
 
-    [string]$Path = ".\output.csv"
+    [string]$Path = ".\issuefields_output.csv"
 )
 
 . $PSScriptRoot\Atlassian_Functions.ps1
