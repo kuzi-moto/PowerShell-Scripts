@@ -4,7 +4,7 @@ Scripts for interacting with Atlassian Cloud. This is different from [AtlassianP
 
 It also works with the SCIM/user provisioning endpoint `scim/directory` which is documented but lacks decent PowerShell tools to work with.
 
-I have not attempted to implement all of the available API methods, only what was needed for my use due to time contstraints.
+I have not attempted to implement all of the available API endpoints, addtionally not all of the endpoints I have implemented may support all available parameters. This is due to time contraints as I have only implemented the methods that I needed to use. I have sorted all of my functions by the categories listed on the Atlassian developer documentation so it's easy to see which ones exist. Even if one is missing, it's easy to use the "Using Invoke-AtlassianApiRequest" section below to use any endpoint.
 
 ## Configuration
 
@@ -48,7 +48,9 @@ There are several scripts I've created to simplify some tasks. Otherwise, you ca
 
 ### Using Invoke-AtlassianApiRequest
 
-The `Invoke-AtlassianApiRequest` helper function will allow you to directly interact with the Atlassian API. This will allow you to run any request from the Atlassian API even if a function hasn't been provided for it.
+The `Invoke-AtlassianApiRequest` helper function will allow you to directly interact with the Atlassian API. This will allow you to run any request from the Atlassian API even if I have not provided a function for it.
+
+The main parameter is `-Request`. When looking at an endpoint for example to get a project `/rest/api/3/project/{projectIdOrKey}` only the text after the API version needs to be supplied. `Get-AtlassianApiRequest -Request "/project/{projectIdOrKey}`. If you would like to supply a query paramater such as expand, you can use the `-QueryParameters` parameter. It accepts a hashtable, where the name should be the query parameter, and the value containing the value to pass to the fuction. For example: `-QueryParameters @{expand=description,issueTypes}`
 
 ### Find the smart value for a field
 
@@ -71,3 +73,8 @@ If you have a particularly long list of values and want to filter the results, y
 ```PowerShell
 $response.names | Get-Member | Where-Object { $_.Definition -match "<searchterm>" }
 ```
+
+## Scripts
+
+### Get_Group_Usage.ps1
+
