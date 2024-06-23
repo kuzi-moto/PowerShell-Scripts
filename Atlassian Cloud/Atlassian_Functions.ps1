@@ -324,11 +324,22 @@ function Invoke-AtlassianApiRequest {
                 $Content = [xml]$Response.Content
             }
             elseif ($Response.Content) {
+
+                if ($Response.Content -is [byte[]]) {
+                    # For some reason when querying Assets API without access,
+                    # the error response is a byte array.
+                    $ResponseContent = [System.Text.Encoding]::UTF8.GetString($Content)
+                }
+                else {
+                    $ResponseContent = $Response.Content
+                }
+
                 try {
-                    $Content = $Response.Content | ConvertFrom-Json -ErrorAction Stop
+                    # Some responses come in JSON. Try to convert these first.
+                    $Content = $ResponseContent | ConvertFrom-Json -ErrorAction Stop
                 }
                 catch {
-                    $Content = $Response.Content
+                    $Content = $ResponseContent
                 }
                 
             }
@@ -2045,8 +2056,8 @@ function Get-JiraRequestType {
     )
 
     $Params = @{
-        Request = 'requesttype'
-        ApiType = 'ServiceDesk'
+        Request         = 'requesttype'
+        ApiType         = 'ServiceDesk'
         QueryParameters = @{
             start = $Start
             limit = $Limit
@@ -2261,7 +2272,13 @@ function Get-AssetsObjectSchemas {
 
     do {
 
-        $Response = Invoke-AtlassianApiRequest @Params
+        try {
+            # If you do not have access to Assets, command will fail.
+            $Response = Invoke-AtlassianApiRequest @Params -ErrorAction Stop
+        }
+        catch {
+            throw
+        }
 
         $i = $Response.startAt + $Response.maxResults
 
@@ -2269,7 +2286,7 @@ function Get-AssetsObjectSchemas {
 
         $Params.QueryParameters.startAt = $i
 
-    } until ($Response.isLast)
+    } until ($Response.isLast -or $null)
 
 }
 
@@ -3122,35 +3139,44 @@ function Get-ConfluenceAllSpaces {
 
 
 function Get-ConfluenceDefaultSpacePermissions {
-
+    
     $Params = @{
-        Request = 'wiki/admin/permissions/viewdefaultspacepermissions.action'
-        ApiType = 'Generic'
+        Request         = 'cgraphql'
+        ApiType         = 'Generic'
+        Method          = 'POST'
+        QueryParameters = @{
+            q = 'spacePermissionsDefaults'
+        }
+        Body            = @{
+            operationName = 'spacePermissionsDefaults'
+            variables     = @{}
+            query         = @'
+query spacePermissionsDefaults {
+  defaultSpacePermissions {
+    editable
+    groupsWithDefaultSpacePermissions(first: 25, after: "", filterText: "") {
+      nodes {
+        subjectKey {
+          id
+          principalType
+          displayName
+          __typename
+        }
+        permissions
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}
+'@        
+        }
     }
 
     $response = Invoke-AtlassianApiRequest @Params
 
-    # Get each perission row. Format: <td align="center" 
-    #                                     class="permissionCell"
-    #                                     valign="middle"
-    #                                     data-permission="setspacepermissions"
-    #                                     data-permission-group="administrators"
-    #                                     data-permission-set="true">
-    $RowMatch = $Response -replace '\n', '' | Select-String -Pattern '<td align="center" .*?>' -AllMatches | Select-Object -ExpandProperty 'Matches' | Select-Object -ExpandProperty 'Value'
-
-    for ($i = 0; $i -lt $RowMatch.Count; $i++) {
-
-        $Table = @{}
-        $RowMatch[$i] | Select-String -Pattern '(\S+?)="(.+?)"' -AllMatches | Select-Object -ExpandProperty Matches | ForEach-Object {
-            $Table[$_.Groups[1].Value] = $_.Groups[2].Value
-        }
-
-        $Table | Select-Object `
-        @{l = 'group'; e = { $_.'data-permission-group' } },
-        @{l = 'permission'; e = { $_.'data-permission' } },
-        @{l = 'permission-set'; e = { $_.'data-permission-set' } }
-
-    }
+    $Response.data.defaultSpacePermissions.groupsWithDefaultSpacePermissions.nodes
 
 }
 
@@ -3176,7 +3202,6 @@ function Get-ConfluenceCustomApplications {
         Request = 'wiki/rest/custom-apps/1.0/customapps/list'
         ApiType = 'Generic'
     }
-
 
     Invoke-AtlassianApiRequest @Params
     
@@ -3414,7 +3439,7 @@ function Get-JiraGlobalAutomationUsage {
         Write-Warning 'Reached the limit of 100 rules, could be missing some.'
     }
 
-    $Response | Select-Object @{l = 'id'; e = { $_.rule.id } },@{l = 'url'; e = { "https://$Domain.atlassian.net/jira/settings/automation#/rule/$($_.rule.id)" } }, @{l = 'name'; e = { $_.rule.name } }, @{l = 'state'; e = { $_.rule.state } }, @{l = 'ruleScope'; e = { $_.rule.ruleScope } }, @{l = 'authorAccountId'; e = { $_.rule.authorAccountId } }, @{l = 'projects'; e = { $_.rule.projects } }, @{l = 'billingType'; e = { $_.rule.billingType } }, executionCount
+    $Response | Select-Object @{l = 'id'; e = { $_.rule.id } }, @{l = 'url'; e = { "https://$Domain.atlassian.net/jira/settings/automation#/rule/$($_.rule.id)" } }, @{l = 'name'; e = { $_.rule.name } }, @{l = 'state'; e = { $_.rule.state } }, @{l = 'ruleScope'; e = { $_.rule.ruleScope } }, @{l = 'authorAccountId'; e = { $_.rule.authorAccountId } }, @{l = 'projects'; e = { $_.rule.projects } }, @{l = 'billingType'; e = { $_.rule.billingType } }, executionCount
 
 }
 
