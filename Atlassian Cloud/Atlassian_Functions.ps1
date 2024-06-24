@@ -21,8 +21,8 @@ function Get-AtlassianConfig {
     .LINK
         Specify a URI to a help page, this will show when Get-Help -Online is used.
     .EXAMPLE
-        Test-MyTestFunction -Verbose
-        Explanation of the function or its result. You can include multiple examples with additional .EXAMPLE lines
+        Get-AtlassianConfig -Properties admin_api_key
+        Returns a string with the value
     #>
 
     param (
@@ -33,14 +33,13 @@ function Get-AtlassianConfig {
         [string]$Path = "$PSScriptRoot\config.json"
     )
 
-    $ReturnObj = @{}
-
     if (-not (Test-Path $Path)) {
 
         $Config = New-Object -TypeName pscustomobject
 
     }
     else {
+        # Grab encrypted values from file
 
         try {
             $File = Get-Content -Path $Path -ErrorAction Stop
@@ -50,75 +49,95 @@ function Get-AtlassianConfig {
 
     }
 
+    $ReturnProperties = @{}
+
+    # Check if the property exists or needs to be updated.
     foreach ($Property in $Properties) {
 
-        if ($Config.$Property -and -not $Update) {
-
-            $ReturnObj.$Property = $Config.$Property
-
-        }
-        else {
+        if (-not $Config.$Property -or $Update) {
 
             switch ($Property) {
                 'admin_api_key' {
-                    $NewValue = Read-Host 'Enter your Atlassian Admin API key (https://support.atlassian.com/organization-administration/docs/manage-an-organization-with-the-admin-apis/)'
+                    $NewValue = Read-Host 'Enter your Atlassian Admin API key (https://support.atlassian.com/organization-administration/docs/manage-an-organization-with-the-admin-apis/)' -AsSecureString
                     break
                 }
                 'cloud_id' {
-                    $NewValue = Read-Host "Enter your Atlassian site Cloud ID.`nThis can be found by going to https://admin.atlassian.com/, manage users for a product, and get the id from the URL: https://admin.atlassian.com/s/<CLOUD-ID>/users"
+                    $NewValue = Read-Host "Enter your Atlassian site Cloud ID.`nThis can be found by going to https://admin.atlassian.com/, manage users for a product, and get the id from the URL: https://admin.atlassian.com/s/<CLOUD-ID>/users" -AsSecureString
                     break
                 }
                 'cloud_session_token' {
                     Write-Host "Copy your cloud.session.token cookie.`nThis can be obtained from your browser cookies for the site https://admin.atlassian.com"
                     $null = Read-Host "Press `"Enter`" when you have copied the token to extract from the system clipboard. The string can be too long to enter fully in the shell.`nThis only works for Windows, and Linux with xclip."
-                    $NewValue = Get-Clipboard
+                    $NewValue = ConvertTo-SecureString -String (Get-Clipboard) -AsPlainText
                     break
                 }
                 'directory_id' {
-                    $NewValue = Read-Host "Enter the directory_id for your identity provider. `nThis can be found in the group called All members for directory - <directory_id>"
+                    $NewValue = Read-Host "Enter the directory_id for your identity provider. `nThis can be found in the group called All members for directory - <directory_id>" -AsSecureString
                     break
                 }
                 'domain' {
-                    $NewValue = Read-Host 'Enter your Atlassian Cloud domain (https://<your-domain>.atlassian.net)'
+                    $NewValue = Read-Host 'Enter your Atlassian Cloud domain (https://<your-domain>.atlassian.net)' -AsSecureString
                     break
                 }
                 'email' {
-                    $NewValue = Read-Host 'Enter your Atlassian Cloud email address'
+                    $NewValue = Read-Host 'Enter your Atlassian Cloud email address' -AsSecureString
                     break
                 }
                 'organization_id' {
-                    $NewValue = Read-Host 'Enter the id for your organization. Can be found in the Admin URL: https://admin.atlassian.com/o/<organization_id>/overview'
+                    $NewValue = Read-Host 'Enter the id for your organization. Can be found in the Admin URL: https://admin.atlassian.com/o/<organization_id>/overview' -AsSecureString
                     break
                 }
                 'scim_api_key' {
-                    $NewValue = Read-Host "Enter your SCIM API key for your IdP connection (https://developer.atlassian.com/cloud/admin/user-provisioning/rest/intro/) `nNote, this is separate from your Cloud admin API key"
+                    $NewValue = Read-Host "Enter your SCIM API key for your IdP connection (https://developer.atlassian.com/cloud/admin/user-provisioning/rest/intro/) `nNote, this is separate from your Cloud admin API key" -AsSecureString
                     break
                 }
                 'user_api_token' {
-                    $NewValue = Read-Host 'Enter your Atlassian Cloud personal API token'
+                    $NewValue = Read-Host 'Enter your Atlassian Cloud personal API token' -AsSecureString
                     break
                 }
                 Default { throw "Unhandled property $_" }
             }
 
+            # If a value was entered, encrypt the value and save to disk.
             if ($NewValue) {
-                $ReturnObj.$Property = $NewValue
-                $Config | Add-Member -NotePropertyName $Property -NotePropertyValue $NewValue -Force
+
+                $Config.$Property = $NewValue | ConvertFrom-SecureString
                 Save-AtlassianConfig $Config
+                $NewValue.Dispose()
+
             }
             else {
-                throw 'No value provided.'
+                Write-Error "No value provided for "$Property" property"
+                continue
             }
-        }
+
+        } # End update
+
+        # Convert the encrypted value to binary string
+        $SecureString = $Config.$Property | ConvertTo-SecureString
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+        
+        # Add property and value to our return object
+        $ReturnProperties.$Property = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        
+        # Make sure to zero and free the BSTR to avoid leaking the plain text string
+        $SecureString.Dispose()
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
     } # End foreach
 
-    if ($Properties.Count -eq 1) {
-        $ReturnObj.($Properties[0])
+    if ($ReturnProperties.Count -eq 0) {
+        Write-Warning "Get-AtlassianConfig: No properties returned"
+    }
+    elseif ($ReturnProperties.Count -eq 1) {
+        $ReturnProperties.($Properties[0])
     }
     else {
-        $ReturnObj
+        $ReturnProperties
     }
+
+    Clear-Variable -Name Config
+    Clear-Variable -Name ReturnProperties
 
 }
 
@@ -3398,7 +3417,7 @@ function Get-JiraAllAutomationExport {
 
     $Params.Request = "gateway/api/automation/internal-api/jira/$CloudId/pro/rest/task/$ExportId/progress"
     $Elapsed = 0
-    Write-Progress -Activity 'Getting Jira Automation Logs' -Status "QUEUED - 0 seconds elapsed" -PercentComplete 0
+    Write-Progress -Activity 'Getting Jira Automation Logs' -Status 'QUEUED - 0 seconds elapsed' -PercentComplete 0
 
     do {
 
@@ -3420,7 +3439,7 @@ function Get-JiraAllAutomationExport {
     Write-Progress -Activity 'Getting Jira Automation Logs' -Completed
 
     if (!$Response.rules) { 
-        Write-Error "Something went wrong, rules were not returned"
+        Write-Error 'Something went wrong, rules were not returned'
         return
     }
 
