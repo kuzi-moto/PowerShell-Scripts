@@ -3377,12 +3377,54 @@ function Get-AtlassianAdminAllUsers {
 
 function Get-JiraAllAutomationExport {
 
+    $CloudId = Get-AtlassianConfig 'cloud_id'
+
     $Params = @{
-        Request = "gateway/api/automation/internal-api/jira/$(Get-AtlassianConfig 'cloud_id')/pro/rest/GLOBAL/rule/export"
+        Request = "gateway/api/automation/internal-api/jira/$CloudId/pro/rest/GLOBAL/rule/export"
         ApiType = 'Generic'
     }
 
-    Invoke-AtlassianApiRequest @Params | Select-Object -ExpandProperty 'rules'
+    Write-Progress -Activity 'Getting Jira Automation Logs' -Status 'Starting export'
+
+    $Response = Invoke-AtlassianApiRequest @Params
+
+    if (!$Response.id) {
+        Write-Error 'Get-JiraAllAutomationExport was not able to return an id.'
+        return
+    }
+    else {
+        $ExportId = $Response.id     
+    }
+
+    $Params.Request = "gateway/api/automation/internal-api/jira/$CloudId/pro/rest/task/$ExportId/progress"
+    $Elapsed = 0
+    Write-Progress -Activity 'Getting Jira Automation Logs' -Status "QUEUED - 0 seconds elapsed" -PercentComplete 0
+
+    do {
+
+        $Response = Invoke-AtlassianApiRequest @Params
+
+        Write-Progress -Activity 'Getting Jira Automation Logs' -Status "$($Response.taskState) - $Elapsed seconds elapsed" -PercentComplete ($Response.totalCompletedChildItems / $Response.totalChildItems * 100)
+
+        if ($Response.taskState -ne 'SUCCESS') {
+            Start-Sleep -Seconds 1
+            $Elapsed ++
+        }
+
+    } until ($Response.taskState -eq 'SUCCESS')
+
+    $Params.Request = "gateway/api/automation/internal-api/jira/$CloudId/pro/rest/GLOBAL/rule/export/$ExportId/download"
+
+    $Response = Invoke-AtlassianApiRequest @Params
+
+    Write-Progress -Activity 'Getting Jira Automation Logs' -Completed
+
+    if (!$Response.rules) { 
+        Write-Error "Something went wrong, rules were not returned"
+        return
+    }
+
+    $Response.rules
 
 }
 
