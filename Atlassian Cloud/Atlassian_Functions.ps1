@@ -328,7 +328,7 @@ function Invoke-AtlassianApiRequest {
                 if ($Response.Content -is [byte[]]) {
                     # For some reason when querying Assets API without access,
                     # the error response is a byte array.
-                    $ResponseContent = [System.Text.Encoding]::UTF8.GetString($Content)
+                    $ResponseContent = [System.Text.Encoding]::UTF8.GetString($Response.Content)
                 }
                 else {
                     $ResponseContent = $Response.Content
